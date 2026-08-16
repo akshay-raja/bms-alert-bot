@@ -3,7 +3,6 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 import requests
-from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # ==================== CONFIGURATION ====================
@@ -35,7 +34,7 @@ def load_trackers():
             elif isinstance(data, list):
                 return data
     except Exception as e:
-        print(f"[!] Warning: Remote config fetch failed ({e}). Using default tracker.")
+        print(f"[!] Remote config fetch failed ({e}). Using default tracker.")
     return DEFAULT_TRACKERS
 
 
@@ -120,10 +119,42 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
         print(f"  [!] Exception delivering ntfy alert: {exc}")
 
 
+def apply_stealth_scripts(context):
+    """Overrides browser fingerprints to bypass Cloudflare bot challenges."""
+    context.add_init_script("""
+        // Pass webdriver test
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        
+        // Pass chrome runtime test
+        window.chrome = { runtime: {}, app: {}, csi: () => {}, loadTimes: () => {} };
+
+        // Pass plugins & languages tests
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ta'] });
+
+        // Pass WebGL vendor test
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameter.apply(this, [parameter]);
+        };
+    """)
+
+
+def handle_cloudflare_challenge(page):
+    """Waits and bypasses Cloudflare challenge if encountered."""
+    for _ in range(5):
+        title = page.title()
+        if "Attention Required" in title or "Just a moment" in title or "Cloudflare" in title:
+            print("    [!] Cloudflare challenge encountered. Waiting for challenge clearance...")
+            page.wait_for_timeout(3000)
+        else:
+            break
+
+
 def switch_date_tab_if_needed(page, day_number, month_short):
-    """Clicks the date pill on the page if BMS loaded the default date."""
     try:
-        # Try locating date button (e.g., text containing '17' and 'AUG')
         date_locator = page.locator(f"xpath=//*[contains(text(), '{day_number}') and contains(text(), '{month_short}')]").first
         if date_locator.is_visible(timeout=2000):
             date_locator.click()
@@ -133,17 +164,11 @@ def switch_date_tab_if_needed(page, day_number, month_short):
 
 
 def extract_all_active_shows(page, target_theaters, availability_filter, preferred_times):
-    """
-    Direct Anchor & Context Scanner:
-    Inspects all clickable booking links on the page, determines their parent theater,
-    time slot, and availability state.
-    """
     script = """
     () => {
         const timeRegex = /(\\d{1,2}:\\d{2}\\s*(?:AM|PM))/i;
         const results = [];
 
-        // Find all booking links that lead to seat layouts or session purchasing
         const links = Array.from(document.querySelectorAll('a[href*="/seat-layout/"], a[href*="/buytickets/"], a[class*="showtime"], a[class*="pill"], div[class*="showtime"] a'));
         
         links.forEach(a => {
@@ -153,7 +178,6 @@ def extract_all_active_shows(page, target_theaters, availability_filter, preferr
 
             const timeStr = timeMatch[1].toUpperCase();
 
-            // Locate parent theater by walking up the DOM tree
             let current = a.parentElement;
             let theaterName = "";
 
@@ -168,7 +192,6 @@ def extract_all_active_shows(page, target_theaters, availability_filter, preferr
 
             if (!theaterName) return;
 
-            // Determine availability color status
             const style = window.getComputedStyle(a);
             const isBlocked = a.classList.contains('disabled') || 
                               a.classList.contains('_disabled') || 
@@ -202,10 +225,10 @@ def extract_all_active_shows(page, target_theaters, availability_filter, preferr
     try:
         raw_shows = page.evaluate(script)
     except Exception as e:
-        print(f"    [!] Error during show extraction: {e}")
+        print(f"    [!] DOM extraction error: {e}")
         raw_shows = []
 
-    print(f"    [DOM SCAN] Total raw active show links found on page: {len(raw_shows)}")
+    print(f"    [DOM SCAN] Total show links detected: {len(raw_shows)}")
 
     matched = []
     for show in raw_shows:
@@ -215,7 +238,7 @@ def extract_all_active_shows(page, target_theaters, availability_filter, preferr
             continue
 
         time_cat = get_time_category(show["time"])
-        print(f"    -> [THEATER MATCH] {venue_name} | Time: {show['time']} ({time_cat}) | Status: {show['status']}")
+        print(f"    -> [MATCH] {venue_name} | Show: {show['time']} ({time_cat}) | Status: {show['status']}")
 
         if availability_filter != "both" and show["status"] != availability_filter:
             continue
@@ -229,15 +252,15 @@ def extract_all_active_shows(page, target_theaters, availability_filter, preferr
 
 
 def scan_seat_layout(page, seat_url, preferred_row_categories):
-    """Opens the direct seat layout link and checks for available rows."""
     try:
-        page.goto(seat_url, wait_until="domcontentloaded", timeout=35000)
+        page.goto(seat_url, wait_until="domcontentloaded", timeout=40000)
+        handle_cloudflare_challenge(page)
         page.wait_for_timeout(3000)
 
-        # Handle BMS popup modals
+        # Handle BMS popups
         try:
             btn = page.locator("button:has-text('Accept'), div:has-text('Accept'), button:has-text('Select Seats')").first
-            if btn.is_visible(timeout=1500):
+            if btn.is_visible(timeout=2000):
                 btn.click()
                 page.wait_for_timeout(1500)
         except Exception:
@@ -307,7 +330,7 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
         return {}
 
 
-def process_tracker(context, tracker):
+def process_tracker(page, tracker):
     user_name = tracker.get("user_name", tracker.get("id", "User"))
     movie_url = tracker.get("movie_url", "").strip()
     theaters = tracker.get("theaters", [])
@@ -334,14 +357,13 @@ def process_tracker(context, tracker):
         formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
         print(f"\n[{time.strftime('%X')}] Scanning showtimes for {formatted_date} ({date_str})...")
 
-        page = context.new_page()
         try:
-            page.goto(full_date_url, wait_until="networkidle", timeout=35000)
-            page.wait_for_timeout(3000)
+            page.goto(full_date_url, wait_until="domcontentloaded", timeout=40000)
+            handle_cloudflare_challenge(page)
+            page.wait_for_timeout(2500)
             switch_date_tab_if_needed(page, day_num, month_short)
         except Exception as e:
             print(f"  [!] Failed to load {full_date_url}: {e}")
-            page.close()
             continue
 
         page_title = page.title()
@@ -350,7 +372,6 @@ def process_tracker(context, tracker):
         matched_shows = extract_all_active_shows(page, theaters, avail_filter, pref_times)
         if not matched_shows:
             print("  [-] No matching showtimes matching availability/time preferences.")
-            page.close()
             continue
 
         for show in matched_shows:
@@ -378,8 +399,6 @@ def process_tracker(context, tracker):
             else:
                 print("     [-] No matching seats in selected distance zones.")
 
-        page.close()
-
     if final_alert_items:
         print(f"\n[🚀] Delivering instant push alert to {user_name}...")
         send_ntfy_alert(topic, movie_url, user_name, final_alert_items)
@@ -396,16 +415,35 @@ def main():
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
-                "--disable-setuid-sandbox"
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--window-position=0,0",
+                "--ignore-certificate-errors",
+                "--ignore-certificate-errors-spki-list",
             ]
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="Asia/Kolkata",
         )
 
+        apply_stealth_scripts(context)
+        page = context.new_page()
+
+        # Warm-up request to establish Cloudflare cookies
+        try:
+            print("[*] Performing warm-up request to acquire session credentials...")
+            page.goto("https://in.bookmyshow.com/explore/movies-chennai", wait_until="domcontentloaded", timeout=30000)
+            handle_cloudflare_challenge(page)
+            page.wait_for_timeout(2000)
+        except Exception as e:
+            print(f"[*] Warm-up notice: {e}")
+
         for tracker in trackers:
-            process_tracker(context, tracker)
+            process_tracker(page, tracker)
 
         browser.close()
 
