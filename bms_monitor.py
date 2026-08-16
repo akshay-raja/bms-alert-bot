@@ -127,122 +127,174 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
         print(f"  [!] Exception delivering ntfy alert: {exc}")
 
 
-def extract_matching_shows(page, target_theaters, availability_filter, preferred_times):
-    """Deep inspects theater containers and pills for active styles and timeframes."""
+def extract_all_venues_and_shows(page):
+    """
+    Robust extractor: Finds elements matching time formats and searches 
+    parent containers to identify the theater name and show status.
+    """
     script = """
     () => {
-        const venues = [];
-        const rows = document.querySelectorAll('li.list, div.listing-info, div[class*="Venue"], div[class*="venue"]');
-        
-        rows.forEach(r => {
-            const nameEl = r.querySelector('a[href*="/cinemas/"], .venue-name, a.name');
-            if (!nameEl) return;
-            const theater = nameEl.innerText.trim();
+        const timeRegex = /\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/i;
+        const allElements = Array.from(document.querySelectorAll('a, button, div, span'));
+        const showPills = [];
 
-            const pills = r.querySelectorAll('a[class*="showtime"], div[class*="showtime"], a[class*="pill"], div[class*="pill"], .showtime-pill');
-            const showList = [];
-
-            pills.forEach(p => {
-                const text = p.innerText.trim().split('\\n')[0];
-                const allContent = (p.className + ' ' + p.innerHTML).toLowerCase();
-
-                const isBlocked = p.classList.contains('disabled') || 
-                                  p.classList.contains('_disabled') || 
-                                  p.getAttribute('aria-disabled') === 'true';
-
-                let status = "disabled";
-
-                // Check colors across pill and its child elements
-                const elements = [p, ...p.querySelectorAll('*')];
-                for (const el of elements) {
-                    const style = window.getComputedStyle(el);
-                    const colorString = [
-                        style.borderColor, 
-                        style.borderLeftColor, 
-                        style.color, 
-                        style.backgroundColor
-                    ].join(' ');
-
-                    const rgbMatches = colorString.matchAll(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/g);
-                    for (const match of rgbMatches) {
-                        const r = parseInt(match[1]), g = parseInt(match[2]), b = parseInt(match[3]);
-                        
-                        // Ignore grey/monochrome tones
-                        if (Math.abs(r - g) < 20 && Math.abs(g - b) < 20) continue;
-
-                        // Green tone: Green is significantly higher than Red & Blue
-                        if (g > 110 && g > r + 20 && g > b + 20) {
-                            status = "available";
-                            break;
-                        }
-                        // Orange / Amber tone: Red is high, Green is moderate, Blue is low
-                        if (r > 160 && g > 60 && b < 100) {
-                            status = "filling_fast";
-                            break;
-                        }
-                    }
-                    if (status !== "disabled") break;
+        // 1. Identify all showtime pill containers
+        for (const el of allElements) {
+            const text = el.innerText ? el.innerText.trim() : '';
+            const match = text.match(timeRegex);
+            
+            // Only consider elements where the immediate text is the showtime pill
+            if (match && text.length < 35 && el.children.length <= 4) {
+                // Avoid capturing duplicate nested parent text
+                if (!showPills.some(p => p.element.contains(el) || el.contains(p.element))) {
+                    showPills.push({ element: el, timeStr: match[1].toUpperCase() });
                 }
-
-                // Fallback: If non-disabled anchor with an active link
-                if (status === "disabled" && !isBlocked && p.tagName === 'A' && p.getAttribute('href')) {
-                    status = "available";
-                }
-
-                const href = p.getAttribute('href') || p.closest('a')?.getAttribute('href') || '';
-                if (!isBlocked && (status === "available" || status === "filling_fast")) {
-                    showList.push({
-                        time: text,
-                        status: status,
-                        href: href
-                    });
-                }
-            });
-
-            if (showList.length > 0) {
-                venues.push({ theater, shows: showList });
             }
+        }
+
+        const theaterMap = new Map();
+
+        // 2. Resolve parent theater for each showtime pill
+        for (const pill of showPills) {
+            const el = pill.element;
+            
+            // Traverse up to find a container with a theater title
+            let current = el.parentElement;
+            let theaterName = '';
+
+            while (current && current !== document.body) {
+                const nameEl = current.querySelector('a[href*="/cinemas/"], .venue-name, a.name, [class*="cinema-name"], [class*="venueName"]');
+                if (nameEl && nameEl.innerText.trim()) {
+                    theaterName = nameEl.innerText.trim();
+                    break;
+                }
+                
+                // Secondary check: look for prominent title text within this container
+                const possibleTitles = Array.from(current.querySelectorAll('a, span, div, h3, h4'))
+                    .map(t => t.innerText ? t.innerText.trim() : '')
+                    .filter(t => t.length > 5 && t.length < 80 && (
+                        t.includes('Cinemas') || t.includes('PVR') || t.includes('INOX') || 
+                        t.includes('Sathyam') || t.includes('SPI') || t.includes('Mall') || 
+                        t.includes('Laser') || t.includes('Screens') || t.includes('Multiplex')
+                    ));
+
+                if (possibleTitles.length > 0) {
+                    theaterName = possibleTitles[0];
+                    break;
+                }
+
+                current = current.parentElement;
+            }
+
+            if (!theaterName) continue;
+
+            // Determine show status (Available vs Filling Fast vs Disabled)
+            const style = window.getComputedStyle(el);
+            const parentStyle = el.parentElement ? window.getComputedStyle(el.parentElement) : style;
+
+            const isBlocked = el.classList.contains('disabled') || 
+                              el.classList.contains('_disabled') || 
+                              el.getAttribute('aria-disabled') === 'true' ||
+                              style.pointerEvents === 'none' ||
+                              style.cursor === 'not-allowed';
+
+            let status = "disabled";
+            const colorString = [
+                style.borderColor, 
+                style.borderLeftColor, 
+                style.color, 
+                style.backgroundColor,
+                parentStyle.borderColor,
+                parentStyle.borderLeftColor
+            ].join(' ');
+
+            const rgbMatches = Array.from(colorString.matchAll(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/g));
+            for (const m of rgbMatches) {
+                const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
+                
+                // Ignore grey/monochrome tones
+                if (Math.abs(r - g) < 25 && Math.abs(g - b) < 25) continue;
+
+                // Green: Green channel is clearly dominant
+                if (g > 100 && g > r + 15 && g > b + 15) {
+                    status = "available";
+                    break;
+                }
+                // Orange/Amber: Red is high, Green is moderate, Blue is low
+                if (r > 150 && g > 60 && b < 110) {
+                    status = "filling_fast";
+                    break;
+                }
+            }
+
+            // Fallback: If not blocked and clickable
+            if (status === "disabled" && !isBlocked && (el.tagName === 'A' || el.onclick || el.getAttribute('role') === 'button')) {
+                status = "available";
+            }
+
+            const href = el.getAttribute('href') || el.closest('a')?.getAttribute('href') || '';
+
+            if (!theaterMap.has(theaterName)) {
+                theaterMap.set(theaterName, []);
+            }
+
+            theaterMap.get(theaterName).push({
+                time: pill.timeStr,
+                status: status,
+                href: href
+            });
+        }
+
+        const results = [];
+        theaterMap.forEach((shows, theater) => {
+            results.push({ theater, shows });
         });
-        return venues;
+        return results;
     }
     """
     try:
-        found_venues = page.evaluate(script)
+        return page.evaluate(script)
     except Exception as e:
         print(f"    [!] DOM extraction error: {e}")
-        found_venues = []
+        return []
 
+
+def filter_shows(found_venues, target_theaters, availability_filter, preferred_times):
     matched = []
     for item in found_venues:
         venue_name = item["theater"]
-        if not any(t.lower() in venue_name.lower() for t in target_theaters):
+        is_target_theater = any(t.lower() in venue_name.lower() for t in target_theaters)
+        if not is_target_theater:
             continue
 
+        print(f"  [DEBUG] Found Target Theater: {venue_name}")
         for show in item["shows"]:
+            time_cat = get_time_category(show["time"])
+            print(f"         Show: {show['time']:<10} | Status: {show['status']:<12} | Slot: {time_cat}")
+
             if availability_filter != "both" and show["status"] != availability_filter:
                 continue
 
-            time_cat = get_time_category(show["time"])
             if preferred_times and time_cat not in preferred_times and time_cat != "all":
                 continue
 
-            matched.append({
-                "theater": venue_name,
-                "time": show["time"],
-                "status": show["status"],
-                "href": show["href"]
-            })
+            if show["status"] in ["available", "filling_fast"]:
+                matched.append({
+                    "theater": venue_name,
+                    "time": show["time"],
+                    "status": show["status"],
+                    "href": show["href"]
+                })
 
     return matched
 
 
 def scan_seat_layout(page, seat_url, preferred_row_categories):
-    """Loads seat layout, bypasses terms popups, and categorizes row zones."""
     try:
         page.goto(seat_url, wait_until="domcontentloaded", timeout=35000)
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(3000)
 
-        # Handle BMS "Terms & Conditions" / "Accept" popups if present
+        # Handle BMS popups if present
         try:
             accept_btn = page.locator("button:has-text('Accept'), div:has-text('Accept'), button:has-text('Proceed')")
             if accept_btn.first.is_visible(timeout=1500):
@@ -286,7 +338,6 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
         if total_rows == 0:
             return seats_by_row
 
-        # Rows from screen perspective (bottom of page upwards)
         rows_from_screen = list(reversed(ordered_rows))
 
         near_screen_end = max(1, math.ceil(total_rows * 0.20))
@@ -332,7 +383,7 @@ def process_tracker(page, tracker):
     print(f"\n==========================================")
     print(f"Watcher: {user_name} | ntfy Topic: {topic}")
     print(f"Theaters: {', '.join(theaters)}")
-    print(f"Times: {', '.join(pref_times)} | Status: {avail_filter.upper()}")
+    print(f"Times: {', '.join(pref_times)} | Status Filter: {avail_filter.upper()}")
     print(f"==========================================")
 
     target_dates = get_target_dates(days_ahead)
@@ -345,12 +396,20 @@ def process_tracker(page, tracker):
 
         try:
             page.goto(full_date_url, wait_until="domcontentloaded", timeout=35000)
-            page.wait_for_timeout(3500)
+            
+            # Wait for showtimes or page content to hydrate
+            try:
+                page.wait_for_selector("text=AM, text=PM", timeout=6000)
+            except Exception:
+                page.wait_for_timeout(3500)
+                
         except Exception as e:
             print(f"  [!] Failed to load {full_date_url}: {e}")
             continue
 
-        matched_shows = extract_matching_shows(page, theaters, avail_filter, pref_times)
+        found_venues = extract_all_venues_and_shows(page)
+        matched_shows = filter_shows(found_venues, theaters, avail_filter, pref_times)
+
         if not matched_shows:
             print("  [-] No matching showtimes matching availability/time preferences.")
             continue
@@ -363,22 +422,21 @@ def process_tracker(page, tracker):
 
             seat_url = f"https://in.bookmyshow.com{href}" if href.startswith("/") else href
 
-            if seat_url:
-                print(f"  -> Found {theater_name} ({show_time} - {show_status}). Checking seats...")
+            if seat_url and "/seat-layout/" in seat_url:
+                print(f"  -> Checking seat layout for {theater_name} ({show_time})...")
                 matched_seats = scan_seat_layout(page, seat_url, pref_rows)
             else:
                 matched_seats = {}
 
-            if matched_seats or not href:
-                print(f"     [🎉 SEATS/SHOW MATCHED] Rows: {list(matched_seats.keys()) if matched_seats else 'Open'}")
-                final_alert_items.append((
-                    date_str,
-                    theater_name,
-                    show_time,
-                    show_status,
-                    matched_seats,
-                    seat_url or full_date_url
-                ))
+            print(f"     [🎉 MATCH CONFIRMED] {theater_name} @ {show_time} ({show_status.upper()})")
+            final_alert_items.append((
+                date_str,
+                theater_name,
+                show_time,
+                show_status,
+                matched_seats,
+                seat_url or full_date_url
+            ))
 
     if final_alert_items:
         print(f"\n[🚀] Delivering instant push alert to {user_name}...")
