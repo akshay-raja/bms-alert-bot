@@ -7,44 +7,45 @@ from playwright.sync_api import sync_playwright
 # ==================== CONFIGURATION ====================
 CONFIG_API_URL = "https://api.npoint.io/803e335a91e27ade1511"
 
-DEFAULT_CONFIG = {
-    "movie_url": "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815",
-    "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
-    "ntfy_topic": "akshay-bms-alert-160826",
-    "days_ahead": 3
-}
+DEFAULT_TRACKERS = [
+    {
+        "id": "default-1",
+        "user_name": "Akshay",
+        "movie_url": "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815",
+        "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
+        "ntfy_topic": "akshay-bms-alert-160826",
+        "days_ahead": 3
+    }
+]
 
-def load_remote_config():
-    """Fetches configuration from npoint; falls back to defaults on failure."""
+def load_trackers():
+    """Fetches all active movie trackers from npoint."""
     try:
         res = requests.get(CONFIG_API_URL, timeout=10)
         if res.status_code == 200:
-            return {**DEFAULT_CONFIG, **res.json()}
+            data = res.json()
+            if isinstance(data, dict) and "trackers" in data:
+                return data["trackers"]
+            elif isinstance(data, list):
+                return data
     except Exception as e:
-        print(f"[!] Warning: Remote config fetch failed ({e}). Using fallback defaults.")
-    return DEFAULT_CONFIG
-
-CONFIG = load_remote_config()
-BASE_MOVIE_URL = CONFIG.get("movie_url", DEFAULT_CONFIG["movie_url"])
-TARGET_THEATERS = CONFIG.get("theaters", DEFAULT_CONFIG["theaters"])
-NTFY_TOPIC = CONFIG.get("ntfy_topic", DEFAULT_CONFIG["ntfy_topic"])
-DAYS_AHEAD = int(CONFIG.get("days_ahead", 3))
-# =======================================================
+        print(f"[!] Warning: Remote config fetch failed ({e}). Using default tracker.")
+    return DEFAULT_TRACKERS
 
 
-def get_target_dates():
-    """Generates YYYYMMDD date strings starting today through days_ahead."""
+def get_target_dates(days_ahead):
+    """Generates target dates starting from today."""
     dates = []
     base_date = datetime.now()
-    for i in range(DAYS_AHEAD + 1):
+    for i in range(int(days_ahead) + 1):
         target_day = base_date + timedelta(days=i)
         dates.append(target_day.strftime("%Y%m%d"))
     return dates
 
 
-def send_ntfy_alert(results_by_date):
-    """Dispatches a push notification with direct link to ntfy."""
-    message_lines = ["Bookings opened for:"]
+def send_ntfy_alert(topic, movie_url, user_name, results_by_date):
+    """Dispatches push notification directly to the specific friend's ntfy topic."""
+    message_lines = [f"Hi {user_name}, bookings opened for:"]
     first_direct_url = None
     
     for date_str, theaters, url in results_by_date:
@@ -55,33 +56,33 @@ def send_ntfy_alert(results_by_date):
         for t in theaters:
             message_lines.append(f"  - {t}")
             
-    message_lines.append(f"\nTap notification to open BookMyShow.")
+    message_lines.append(f"\nTap to open BookMyShow.")
     message = "\n".join(message_lines)
 
     headers = {
-        "Title": "BMS Tickets Live!",
+        "Title": f"BMS Live: {user_name}'s Movie!",
         "Priority": "urgent",
         "Tags": "ticket,movie_camera",
-        "Click": first_direct_url or BASE_MOVIE_URL,
+        "Click": first_direct_url or movie_url,
     }
 
     try:
         response = requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
+            f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
             headers=headers,
             timeout=10,
         )
         if response.status_code == 200:
-            print("[✓] Push alert delivered to ntfy successfully!")
+            print(f"  [✓] Push alert sent to '{topic}'!")
         else:
-            print(f"[!] ntfy request failed with status: {response.status_code}")
+            print(f"  [!] ntfy delivery failed for '{topic}': {response.status_code}")
     except Exception as exc:
-        print(f"[!] Failed to send notification: {exc}")
+        print(f"  [!] Exception delivering ntfy alert: {exc}")
 
 
 def scan_date(page, target_theaters, full_url):
-    """Scans a single movie date page for target cinema listings."""
+    """Scans a specific date URL for venue matches."""
     try:
         page.goto(full_url, wait_until="networkidle", timeout=35000)
         page.wait_for_timeout(3000)
@@ -113,15 +114,46 @@ def scan_date(page, target_theaters, full_url):
         return []
 
 
-def main():
-    target_dates = get_target_dates()
-    print(f"=== Starting BookMyShow Scan ===")
-    print(f"Target URL: {BASE_MOVIE_URL}")
-    print(f"Dates to scan: {', '.join(target_dates)}")
-    print(f"Tracking theaters: {', '.join(TARGET_THEATERS)}")
-    print(f"ntfy topic: {NTFY_TOPIC}\n")
+def process_tracker(page, tracker):
+    user_name = tracker.get("user_name", "Friend")
+    movie_url = tracker.get("movie_url", "").strip()
+    theaters = tracker.get("theaters", [])
+    topic = tracker.get("ntfy_topic", "").strip()
+    days_ahead = tracker.get("days_ahead", 3)
 
+    if not movie_url or not topic or not theaters:
+        print(f"[-] Skipping invalid tracker ({user_name})")
+        return
+
+    print(f"\n--- Processing: {user_name} (Topic: {topic}) ---")
+    print(f"Movie: {movie_url}")
+    print(f"Watching for: {', '.join(theaters)}")
+
+    target_dates = get_target_dates(days_ahead)
     matched_results = []
+
+    for date_str in target_dates:
+        url = f"{movie_url.rstrip('/')}/{date_str}"
+        formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
+        print(f"  [{time.strftime('%X')}] Checking {formatted_date}...")
+
+        matches = scan_date(page, theaters, url)
+        if matches:
+            print(f"    -> [MATCH FOUND] {len(matches)} theater(s): {matches}")
+            matched_results.append((date_str, matches, url))
+        else:
+            print("    -> No target theaters open.")
+
+    if matched_results:
+        print(f"  [🎉] Sending notification to {user_name}...")
+        send_ntfy_alert(topic, movie_url, user_name, matched_results)
+
+
+def main():
+    trackers = load_trackers()
+    print(f"=== Starting Multi-User BMS Scanner ===")
+    print(f"Active Trackers Found: {len(trackers)}")
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
@@ -133,25 +165,12 @@ def main():
         )
         page = context.new_page()
 
-        for date_str in target_dates:
-            url = f"{BASE_MOVIE_URL.rstrip('/')}/{date_str}"
-            formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
-            print(f"[{time.strftime('%X')}] Checking {formatted_date}...")
-
-            matches = scan_date(page, TARGET_THEATERS, url)
-            if matches:
-                print(f"  -> [MATCH FOUND] {len(matches)} theater(s): {matches}")
-                matched_results.append((date_str, matches, url))
-            else:
-                print(f"  -> No target theaters open.")
+        for tracker in trackers:
+            process_tracker(page, tracker)
 
         browser.close()
 
-    if matched_results:
-        print(f"\n[🎉] Delivering push alert...")
-        send_ntfy_alert(matched_results)
-    else:
-        print("\n[-] No matches found across requested dates.")
+    print("\n=== All Tracker Scans Finished ===")
 
 
 if __name__ == "__main__":
