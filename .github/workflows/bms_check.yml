@@ -1,0 +1,29 @@
+name: Check BookMyShow Tickets
+
+on:
+  schedule:
+    # Runs automatically every 5 minutes (GitHub's minimum cron frequency)
+    - cron: '*/5 * * * *'
+  # Enables manual test runs from the GitHub website
+  workflow_dispatch:
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install playwright requests beautifulsoup4
+          playwright install --with-deps chromium
+
+      - name: Execute BMS ticket check
+        run: python bms_monitor.py
