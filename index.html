@@ -15,21 +15,37 @@
       --input-bg: #0f172a;
       --border: #334155;
       --success: #10b981;
+      --info-bg: rgba(56, 189, 248, 0.1);
+      --info-border: #0284c7;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background: var(--bg); color: var(--text); padding: 24px 16px; display: flex; justify-content: center; }
     .container { width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
     h1 { font-size: 1.35rem; font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
-    p.sub { font-size: 0.85rem; color: var(--muted); margin-bottom: 20px; }
-    .form-group { margin-bottom: 14px; }
-    label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 5px; color: var(--text); }
+    p.sub { font-size: 0.85rem; color: var(--muted); margin-bottom: 18px; }
+    .form-group { margin-bottom: 14px; position: relative; }
+    label { display: flex; justify-content: space-between; align-items: center; font-size: 0.82rem; font-weight: 600; margin-bottom: 5px; color: var(--text); }
     input, textarea, select {
       width: 100%; background: var(--input-bg); border: 1px solid var(--border);
       border-radius: 8px; padding: 10px 12px; color: var(--text); font-size: 0.88rem; outline: none;
     }
     input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+    input[readonly] { background: #162032; color: #38bdf8; border-color: #1e3a5f; cursor: not-allowed; font-family: monospace; font-weight: 600; }
     small { font-size: 0.72rem; color: var(--muted); display: block; margin-top: 3px; }
     
+    /* Guide / Tooltip Box */
+    .guide-box {
+      background: var(--info-bg); border: 1px solid var(--info-border); border-radius: 8px;
+      padding: 12px 14px; margin-top: 6px; font-size: 0.8rem; line-height: 1.45;
+    }
+    .guide-box ol { margin-left: 18px; margin-top: 6px; }
+    .guide-box li { margin-bottom: 4px; color: #e2e8f0; }
+    .copy-btn {
+      background: #0284c7; color: white; border: none; padding: 3px 8px; border-radius: 4px;
+      font-size: 0.72rem; cursor: pointer; font-weight: 600; margin-left: 6px;
+    }
+    .copy-btn:hover { background: #0369a1; }
+
     .checkbox-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 6px; }
     .checkbox-item {
       display: flex; align-items: center; gap: 8px; background: var(--input-bg);
@@ -38,7 +54,7 @@
     .checkbox-item input { width: auto; margin: 0; cursor: pointer; }
 
     .actions { display: flex; gap: 10px; margin-top: 20px; }
-    button {
+    button.main-btn {
       flex: 1; padding: 12px; border: none; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
       cursor: pointer; transition: 0.2s ease;
     }
@@ -56,12 +72,31 @@
 
 <div class="container">
   <h1>🎟️ BMS Granular Seat Watcher</h1>
-  <p class="sub">Set up individual alerts for specific showtimes and seating zones.</p>
+  <p class="sub">Set up your alert. The push notification topic is locked and pre-configured.</p>
 
   <div class="form-group">
     <label>Your Personal Key / Secret Identifier</label>
-    <input type="text" id="user_key" placeholder="e.g. akshay_pvr, rahul_omr" onchange="loadUserTracker()">
-    <small>Only you can view and edit this configuration.</small>
+    <input type="text" id="user_key" placeholder="e.g. akshay, rahul" oninput="handleUserKeyChange()">
+    <small>Unique ID to access your settings privately from this device.</small>
+  </div>
+
+  <div class="form-group">
+    <label>
+      <span>ntfy Notification Channel (Hardcoded)</span>
+      <button class="copy-btn" type="button" onclick="copyTopic()">📋 Copy Topic</button>
+    </label>
+    <input type="text" id="ntfy_topic" readonly value="akshay-bms-alert-160826">
+
+    <!-- Step-by-step App Setup Guide -->
+    <div class="guide-box">
+      <strong>📱 How to configure alerts on your phone:</strong>
+      <ol>
+        <li>Download the <strong>ntfy</strong> app from Google Play or App Store.</li>
+        <li>Open ntfy, tap <strong><code>+</code></strong> (Subscribe to topic).</li>
+        <li>Enter the exact topic name: <code id="guide_topic" style="color: #38bdf8; font-weight: bold;">akshay-bms-alert-160826</code></li>
+        <li>Tap <strong>Subscribe</strong> and allow background notifications.</li>
+      </ol>
+    </div>
   </div>
 
   <hr style="border: 0; border-top: 1px solid var(--border); margin: 16px 0;">
@@ -106,11 +141,6 @@
   </div>
 
   <div class="form-group">
-    <label>ntfy Notification Topic</label>
-    <input type="text" id="ntfy_topic" placeholder="e.g. akshay-bms-alert-160826">
-  </div>
-
-  <div class="form-group">
     <label>Days Ahead to Scan</label>
     <select id="days_ahead">
       <option value="0">Today only</option>
@@ -122,8 +152,8 @@
   </div>
 
   <div class="actions">
-    <button class="btn-save" onclick="saveUserTracker()">💾 Save & Watch Seats</button>
-    <button class="btn-delete" onclick="deleteUserTracker()">🗑️ Clear</button>
+    <button class="main-btn btn-save" onclick="saveUserTracker()">💾 Save & Watch Seats</button>
+    <button class="main-btn btn-delete" onclick="deleteUserTracker()">🗑️ Clear</button>
   </div>
 
   <div id="status"></div>
@@ -131,14 +161,28 @@
 
 <script>
   const CONFIG_API_URL = "https://api.npoint.io/803e335a91e27ade1511";
+  const DEFAULT_TOPIC = "akshay-bms-alert-160826";
 
   window.onload = () => {
-    const savedKey = localStorage.getItem('bms_user_key') || '';
-    if (savedKey) {
-      document.getElementById('user_key').value = savedKey;
-      loadUserTracker();
-    }
+    const savedKey = localStorage.getItem('bms_user_key') || 'akshay';
+    document.getElementById('user_key').value = savedKey;
+    handleUserKeyChange();
+    loadUserTracker();
   };
+
+  function handleUserKeyChange() {
+    const userKey = document.getElementById('user_key').value.trim().toLowerCase();
+    const topic = userKey && userKey !== 'akshay' ? `${userKey}-bms-alert-160826` : DEFAULT_TOPIC;
+    document.getElementById('ntfy_topic').value = topic;
+    document.getElementById('guide_topic').innerText = topic;
+  }
+
+  function copyTopic() {
+    const topic = document.getElementById('ntfy_topic').value;
+    navigator.clipboard.writeText(topic).then(() => {
+      showStatus(`Copied topic "${topic}" to clipboard!`);
+    });
+  }
 
   function showStatus(msg, isError = false) {
     const el = document.getElementById('status');
@@ -171,7 +215,6 @@
     if (myTracker) {
       document.getElementById('movie_url').value = myTracker.movie_url || '';
       document.getElementById('theaters').value = (myTracker.theaters || []).join(', ');
-      document.getElementById('ntfy_topic').value = myTracker.ntfy_topic || '';
       document.getElementById('days_ahead').value = myTracker.days_ahead ?? 3;
       document.getElementById('availability_filter').value = myTracker.availability_filter || 'both';
 
@@ -185,12 +228,11 @@
         cb.checked = rows.includes(cb.value);
       });
 
-      showStatus(`Loaded alert settings for '${userKey}'.`);
+      showStatus(`Loaded active settings for '${userKey}'.`);
     } else {
       document.getElementById('movie_url').value = '';
       document.getElementById('theaters').value = '';
-      document.getElementById('ntfy_topic').value = '';
-      showStatus(`No saved alert found for '${userKey}'. Enter details to create one.`);
+      showStatus(`New session for '${userKey}'. Ready to configure.`);
     }
   }
 
@@ -205,13 +247,13 @@
     const preferred_times = Array.from(document.querySelectorAll('input[name="pref_time"]:checked')).map(cb => cb.value);
     const preferred_rows = Array.from(document.querySelectorAll('input[name="pref_row"]:checked')).map(cb => cb.value);
 
-    if (!userKey || !movie_url || !theaters.length || !ntfy_topic) {
-      showStatus('Please fill in Your Key, Movie URL, Theaters, and ntfy topic.', true);
+    if (!userKey || !movie_url || !theaters.length) {
+      showStatus('Please provide Your Key, Movie URL, and Target Theaters.', true);
       return;
     }
 
     if (!preferred_times.length || !preferred_rows.length) {
-      showStatus('Please select at least one show timing and row distance zone.', true);
+      showStatus('Select at least one show timing and row distance zone.', true);
       return;
     }
 
@@ -247,7 +289,7 @@
       });
 
       if (res.ok) {
-        showStatus(`✓ Alert for '${userKey}' is active! Background scanner will now watch these seats.`);
+        showStatus(`✓ Alert for '${userKey}' saved! Notifications will route to '${ntfy_topic}'.`);
       } else {
         showStatus('Failed to update remote storage.', true);
       }
@@ -274,7 +316,6 @@
       if (res.ok) {
         document.getElementById('movie_url').value = '';
         document.getElementById('theaters').value = '';
-        document.getElementById('ntfy_topic').value = '';
         showStatus(`Alert '${userKey}' removed.`);
       }
     } catch (err) {
