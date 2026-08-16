@@ -1,12 +1,12 @@
-import json
-import os
 import time
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ==================== DEFAULT CONFIGURATION ====================
+# ==================== CONFIGURATION ====================
+CONFIG_API_URL = "https://api.npoint.io/803e335a91e27ade1511"
+
 DEFAULT_CONFIG = {
     "movie_url": "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815",
     "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
@@ -14,28 +14,26 @@ DEFAULT_CONFIG = {
     "days_ahead": 3
 }
 
-CONFIG_FILE = "config.json"
-
-def load_config():
-    """Loads configuration from config.json if present; otherwise uses defaults."""
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return {**DEFAULT_CONFIG, **data}
-        except Exception as e:
-            print(f"[!] Warning: Failed to read config.json ({e}). Using defaults.")
+def load_remote_config():
+    """Fetches configuration from npoint; falls back to defaults on failure."""
+    try:
+        res = requests.get(CONFIG_API_URL, timeout=10)
+        if res.status_code == 200:
+            return {**DEFAULT_CONFIG, **res.json()}
+    except Exception as e:
+        print(f"[!] Warning: Remote config fetch failed ({e}). Using fallback defaults.")
     return DEFAULT_CONFIG
 
-CONFIG = load_config()
-BASE_MOVIE_URL = CONFIG["movie_url"]
-TARGET_THEATERS = CONFIG["theaters"]
-NTFY_TOPIC = CONFIG["ntfy_topic"]
+CONFIG = load_remote_config()
+BASE_MOVIE_URL = CONFIG.get("movie_url", DEFAULT_CONFIG["movie_url"])
+TARGET_THEATERS = CONFIG.get("theaters", DEFAULT_CONFIG["theaters"])
+NTFY_TOPIC = CONFIG.get("ntfy_topic", DEFAULT_CONFIG["ntfy_topic"])
 DAYS_AHEAD = int(CONFIG.get("days_ahead", 3))
-# ===============================================================
+# =======================================================
 
 
 def get_target_dates():
+    """Generates YYYYMMDD date strings starting today through days_ahead."""
     dates = []
     base_date = datetime.now()
     for i in range(DAYS_AHEAD + 1):
@@ -45,6 +43,7 @@ def get_target_dates():
 
 
 def send_ntfy_alert(results_by_date):
+    """Dispatches a push notification with direct link to ntfy."""
     message_lines = ["Bookings opened for:"]
     first_direct_url = None
     
@@ -74,14 +73,15 @@ def send_ntfy_alert(results_by_date):
             timeout=10,
         )
         if response.status_code == 200:
-            print("[✓] Notification delivered to ntfy app successfully!")
+            print("[✓] Push alert delivered to ntfy successfully!")
         else:
             print(f"[!] ntfy request failed with status: {response.status_code}")
     except Exception as exc:
-        print(f"[!] Failed to send push notification: {exc}")
+        print(f"[!] Failed to send notification: {exc}")
 
 
 def scan_date(page, target_theaters, full_url):
+    """Scans a single movie date page for target cinema listings."""
     try:
         page.goto(full_url, wait_until="networkidle", timeout=35000)
         page.wait_for_timeout(3000)
@@ -115,10 +115,11 @@ def scan_date(page, target_theaters, full_url):
 
 def main():
     target_dates = get_target_dates()
-    print(f"=== Starting BookMyShow Multi-Date Scan ===")
-    print(f"Movie URL: {BASE_MOVIE_URL}")
+    print(f"=== Starting BookMyShow Scan ===")
+    print(f"Target URL: {BASE_MOVIE_URL}")
     print(f"Dates to scan: {', '.join(target_dates)}")
-    print(f"Theaters: {', '.join(TARGET_THEATERS)}\n")
+    print(f"Tracking theaters: {', '.join(TARGET_THEATERS)}")
+    print(f"ntfy topic: {NTFY_TOPIC}\n")
 
     matched_results = []
     with sync_playwright() as playwright:
@@ -150,7 +151,7 @@ def main():
         print(f"\n[🎉] Delivering push alert...")
         send_ntfy_alert(matched_results)
     else:
-        print("\n[-] No matches found across today and next days.")
+        print("\n[-] No matches found across requested dates.")
 
 
 if __name__ == "__main__":
