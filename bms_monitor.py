@@ -1,3 +1,5 @@
+import math
+import re
 import time
 from datetime import datetime, timedelta
 import requests
@@ -9,17 +11,19 @@ CONFIG_API_URL = "https://api.npoint.io/803e335a91e27ade1511"
 
 DEFAULT_TRACKERS = [
     {
-        "id": "default-1",
+        "id": "akshay",
         "user_name": "Akshay",
         "movie_url": "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815",
         "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
         "ntfy_topic": "akshay-bms-alert-160826",
-        "days_ahead": 3
+        "days_ahead": 3,
+        "availability_filter": "both",        # "available", "filling_fast", "both"
+        "preferred_times": ["morning", "night"], # "morning", "afternoon", "evening", "night"
+        "preferred_rows": ["upper_middle", "near_top"] # "near_screen", "lower_middle", "upper_middle", "near_top"
     }
 ]
 
 def load_trackers():
-    """Fetches all active movie trackers from npoint."""
     try:
         res = requests.get(CONFIG_API_URL, timeout=10)
         if res.status_code == 200:
@@ -34,7 +38,6 @@ def load_trackers():
 
 
 def get_target_dates(days_ahead):
-    """Generates target dates starting from today."""
     dates = []
     base_date = datetime.now()
     for i in range(int(days_ahead) + 1):
@@ -43,26 +46,50 @@ def get_target_dates(days_ahead):
     return dates
 
 
-def send_ntfy_alert(topic, movie_url, user_name, results_by_date):
-    """Dispatches push notification directly to the specific friend's ntfy topic."""
-    message_lines = [f"Hi {user_name}, bookings opened for:"]
+def get_time_category(time_str):
+    """Categorizes showtime string into morning, afternoon, evening, night."""
+    clean_time = time_str.upper().strip()
+    match = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', clean_time)
+    if not match:
+        return "all"
+    hours, minutes, period = int(match.group(1)), int(match.group(2)), match.group(3)
+    if period == "PM" and hours != 12:
+        hours += 12
+    elif period == "AM" and hours == 12:
+        hours = 0
+
+    if 6 <= hours < 12:
+        return "morning"
+    elif 12 <= hours < 16:
+        return "afternoon"
+    elif 16 <= hours < 20:
+        return "evening"
+    else:
+        return "night"
+
+
+def send_ntfy_alert(topic, movie_url, user_name, results):
+    """Dispatches push notification with row and seat details."""
+    message_lines = [f"Hi {user_name}, matching seats found!"]
     first_direct_url = None
-    
-    for date_str, theaters, url in results_by_date:
+
+    for date_str, theater_name, show_time, status, seat_dict, seat_url in results:
         if not first_direct_url:
-            first_direct_url = url
+            first_direct_url = seat_url
         formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
-        message_lines.append(f"\n[{formatted_date}]:")
-        for t in theaters:
-            message_lines.append(f"  - {t}")
-            
-    message_lines.append(f"\nTap to open BookMyShow.")
+        message_lines.append(f"\n[{formatted_date}] {theater_name}")
+        message_lines.append(f"Show: {show_time} ({status.title()})")
+        
+        for row, seats in seat_dict.items():
+            message_lines.append(f"  Row {row}: {', '.join(seats)}")
+
+    message_lines.append("\nTap notification to open seat layout immediately.")
     message = "\n".join(message_lines)
 
     headers = {
-        "Title": f"BMS Live: {user_name}'s Movie!",
+        "Title": f"🎟️ BMS Seats Alert: {user_name}!",
         "Priority": "urgent",
-        "Tags": "ticket,movie_camera",
+        "Tags": "ticket,seat",
         "Click": first_direct_url or movie_url,
     }
 
@@ -74,85 +101,253 @@ def send_ntfy_alert(topic, movie_url, user_name, results_by_date):
             timeout=10,
         )
         if response.status_code == 200:
-            print(f"  [✓] Push alert sent to '{topic}'!")
+            print(f"  [✓] Notification delivered to '{topic}'!")
         else:
-            print(f"  [!] ntfy delivery failed for '{topic}': {response.status_code}")
+            print(f"  [!] ntfy delivery error: {response.status_code}")
     except Exception as exc:
         print(f"  [!] Exception delivering ntfy alert: {exc}")
 
 
-def scan_date(page, target_theaters, full_url):
-    """Scans a specific date URL for venue matches."""
+def extract_matching_shows(page, target_theaters, availability_filter, preferred_times):
+    """Parses cinema listings and show pills for color scheme and time slot."""
+    script = """
+    () => {
+        const venues = [];
+        const rows = document.querySelectorAll('li.list, div.listing-info, div[class*="Venue"], div[class*="venue"]');
+        
+        rows.forEach(r => {
+            const nameEl = r.querySelector('a[href*="/cinemas/"], .venue-name, a.name');
+            if (!nameEl) return;
+            const theater = nameEl.innerText.trim();
+
+            const pills = r.querySelectorAll('a[class*="showtime"], div[class*="showtime"], a[class*="pill"], div[class*="pill"], .showtime-pill');
+            const showList = [];
+
+            pills.forEach(p => {
+                const text = p.innerText.trim().split('\\n')[0];
+                const style = window.getComputedStyle(p);
+                const borderLeft = style.borderLeftColor || style.borderColor || '';
+                const color = style.color || '';
+
+                const isBlocked = p.classList.contains('disabled') || 
+                                  p.classList.contains('_disabled') || 
+                                  p.getAttribute('aria-disabled') === 'true' ||
+                                  style.pointerEvents === 'none';
+
+                let status = "disabled";
+                const rgbMatch = (borderLeft + ' ' + color).match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+                if (rgbMatch) {
+                    const [_, r_val, g_val, b_val] = rgbMatch.map(Number);
+                    if (g_val > 140 && g_val > r_val + 20) {
+                        status = "available"; // Green
+                    } else if (r_val > 200 && g_val > 100 && b_val < 80) {
+                        status = "filling_fast"; // Amber/Orange
+                    }
+                }
+
+                const href = p.getAttribute('href') || (p.tagName === 'A' ? p.href : '');
+                if (!isBlocked && (status === "available" || status === "filling_fast")) {
+                    showList.push({
+                        time: text,
+                        status: status,
+                        href: href
+                    });
+                }
+            });
+
+            if (showList.length > 0) {
+                venues.push({ theater, shows: showList });
+            }
+        });
+        return venues;
+    }
+    """
     try:
-        page.goto(full_url, wait_until="networkidle", timeout=35000)
-        page.wait_for_timeout(3000)
+        found_venues = page.evaluate(script)
+    except Exception:
+        found_venues = []
 
-        soup = BeautifulSoup(page.content(), "html.parser")
-        found_theaters = set()
+    matched = []
+    for item in found_venues:
+        venue_name = item["theater"]
+        is_target_theater = any(t.lower() in venue_name.lower() for t in target_theaters)
+        if not is_target_theater:
+            continue
 
-        for el in soup.find_all("a", href=lambda h: h and ("/cinemas/" in h or "/buytickets/" in h)):
-            text = el.get_text(strip=True)
-            if text and len(text) > 3:
-                found_theaters.add(text)
+        for show in item["shows"]:
+            # Check availability status filter
+            if availability_filter != "both" and show["status"] != availability_filter:
+                continue
 
-        if not found_theaters:
-            for item in soup.find_all(["li", "div", "span"], class_=lambda c: c and ("venue" in c.lower() or "cinema" in c.lower())):
-                text = item.get_text(strip=True)
-                if text and len(text) > 3:
-                    found_theaters.add(text)
+            # Check time-of-day category
+            time_cat = get_time_category(show["time"])
+            if preferred_times and time_cat not in preferred_times:
+                continue
 
-        matched = []
-        for venue in found_theaters:
-            for target in target_theaters:
-                if target.lower() in venue.lower():
-                    matched.append(venue)
-                    break
+            matched.append({
+                "theater": venue_name,
+                "time": show["time"],
+                "status": show["status"],
+                "href": show["href"]
+            })
 
-        return list(set(matched))
+    return matched
+
+
+def scan_seat_layout(page, seat_url, preferred_row_categories):
+    """
+    Renders seat layout, splits rows into 4 screen-relative zones,
+    and returns Available (Green) and Bestseller (Golden) seats.
+    """
+    try:
+        page.goto(seat_url, wait_until="networkidle", timeout=35000)
+        page.wait_for_timeout(3500)
+
+        script = """
+        () => {
+            // Find all row label elements
+            const rowLabels = Array.from(document.querySelectorAll('div[class*="row-name"], td[class*="row-name"], .seat-row-name, span[class*="row"]'))
+                                  .map(el => el.innerText.trim())
+                                  .filter(txt => txt.length > 0 && txt.length <= 3);
+
+            // Deduplicate row names maintaining top-to-bottom layout order
+            const orderedRows = [...new Set(rowLabels)];
+
+            // Extract all available seats (green and bestseller/orange borders)
+            const seatElements = document.querySelectorAll('a[class*="_available"], div[class*="_available"], a[class*="seat"]:not([class*="blocked"]):not([class*="sold"]), .seat-available');
+            
+            const results = {};
+            seatElements.forEach(s => {
+                const id = s.innerText.trim() || s.getAttribute('data-seat-number') || '';
+                const row = s.getAttribute('data-row-name') || id.replace(/[0-9]/g, '').trim();
+                const num = id.replace(/[^0-9]/g, '').trim();
+                
+                if (row && num) {
+                    if (!results[row]) results[row] = [];
+                    results[row].push(num);
+                }
+            });
+
+            return { orderedRows, availableSeatsByRow: results };
+        }
+        """
+        data = page.evaluate(script)
+        ordered_rows = data.get("orderedRows", [])
+        seats_by_row = data.get("availableSeatsByRow", {})
+
+        if not ordered_rows:
+            ordered_rows = list(seats_by_row.keys())
+
+        total_rows = len(ordered_rows)
+        if total_rows == 0:
+            return {}
+
+        # Screen is at the bottom in BookMyShow.
+        # ordered_rows top-to-bottom = [Q, P, N, M, L, K, J, H, G]
+        # Reversed = [G, H, J, K, L, M, N, P, Q] (Closest to screen first)
+        rows_from_screen = list(reversed(ordered_rows))
+
+        near_screen_end = max(1, math.ceil(total_rows * 0.20))
+        lower_middle_end = max(near_screen_end + 1, math.ceil(total_rows * 0.40))
+        upper_middle_end = max(lower_middle_end + 1, math.ceil(total_rows * 0.70))
+
+        zone_rows = {
+            "near_screen": set(rows_from_screen[:near_screen_end]),
+            "lower_middle": set(rows_from_screen[near_screen_end:lower_middle_end]),
+            "upper_middle": set(rows_from_screen[lower_middle_end:upper_middle_end]),
+            "near_top": set(rows_from_screen[upper_middle_end:])
+        }
+
+        # Filter rows based on user preferences
+        target_rows = set()
+        for pref in preferred_row_categories:
+            target_rows.update(zone_rows.get(pref, set()))
+
+        matched_seats = {}
+        for row_name, seat_list in seats_by_row.items():
+            if row_name in target_rows and seat_list:
+                matched_seats[row_name] = seat_list
+
+        return matched_seats
+
     except Exception as exc:
-        print(f"    [!] Error scanning {full_url}: {exc}")
-        return []
+        print(f"    [!] Error scanning seat layout ({seat_url}): {exc}")
+        return {}
 
 
 def process_tracker(page, tracker):
-    user_name = tracker.get("user_name", "Friend")
+    user_name = tracker.get("user_name", tracker.get("id", "User"))
     movie_url = tracker.get("movie_url", "").strip()
     theaters = tracker.get("theaters", [])
     topic = tracker.get("ntfy_topic", "").strip()
     days_ahead = tracker.get("days_ahead", 3)
+    avail_filter = tracker.get("availability_filter", "both")
+    pref_times = tracker.get("preferred_times", ["morning", "afternoon", "evening", "night"])
+    pref_rows = tracker.get("preferred_rows", ["upper_middle", "near_top"])
 
     if not movie_url or not topic or not theaters:
-        print(f"[-] Skipping invalid tracker ({user_name})")
         return
 
-    print(f"\n--- Processing: {user_name} (Topic: {topic}) ---")
-    print(f"Movie: {movie_url}")
-    print(f"Watching for: {', '.join(theaters)}")
+    print(f"\n==========================================")
+    print(f"Checking: {user_name} | Topic: {topic}")
+    print(f"Times: {', '.join(pref_times)} | Zones: {', '.join(pref_rows)}")
+    print(f"Status Filter: {avail_filter.upper()}")
+    print(f"==========================================")
 
     target_dates = get_target_dates(days_ahead)
-    matched_results = []
+    final_alert_items = []
 
     for date_str in target_dates:
-        url = f"{movie_url.rstrip('/')}/{date_str}"
+        full_date_url = f"{movie_url.rstrip('/')}/{date_str}"
         formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
-        print(f"  [{time.strftime('%X')}] Checking {formatted_date}...")
+        print(f"\n[{time.strftime('%X')}] Scanning showtimes for {formatted_date}...")
 
-        matches = scan_date(page, theaters, url)
-        if matches:
-            print(f"    -> [MATCH FOUND] {len(matches)} theater(s): {matches}")
-            matched_results.append((date_str, matches, url))
-        else:
-            print("    -> No target theaters open.")
+        try:
+            page.goto(full_date_url, wait_until="networkidle", timeout=35000)
+            page.wait_for_timeout(3000)
+        except Exception:
+            continue
 
-    if matched_results:
-        print(f"  [🎉] Sending notification to {user_name}...")
-        send_ntfy_alert(topic, movie_url, user_name, matched_results)
+        matched_shows = extract_matching_shows(page, theaters, avail_filter, pref_times)
+        if not matched_shows:
+            print("  [-] No matching showtimes matching availability/time preferences.")
+            continue
+
+        for show in matched_shows:
+            theater_name = show["theater"]
+            show_time = show["time"]
+            show_status = show["status"]
+            href = show["href"]
+
+            seat_url = f"https://in.bookmyshow.com{href}" if href.startswith("/") else href
+            if not seat_url:
+                continue
+
+            print(f"  -> Found {theater_name} ({show_time} - {show_status}). Inspecting seat layout...")
+            matched_seats = scan_seat_layout(page, seat_url, pref_rows)
+
+            if matched_seats:
+                print(f"     [🎉 SEATS MATCHED] Rows: {list(matched_seats.keys())}")
+                final_alert_items.append((
+                    date_str,
+                    theater_name,
+                    show_time,
+                    show_status,
+                    matched_seats,
+                    seat_url
+                ))
+            else:
+                print("     [-] No matching seats open in selected row zones.")
+
+    if final_alert_items:
+        print(f"\n[🚀] Delivering instant push notification to {user_name}...")
+        send_ntfy_alert(topic, movie_url, user_name, final_alert_items)
 
 
 def main():
     trackers = load_trackers()
-    print(f"=== Starting Multi-User BMS Scanner ===")
-    print(f"Active Trackers Found: {len(trackers)}")
+    print(f"=== Starting Granular BMS Seat & Showtime Scanner ===")
+    print(f"Total Watchers: {len(trackers)}")
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -170,7 +365,7 @@ def main():
 
         browser.close()
 
-    print("\n=== All Tracker Scans Finished ===")
+    print("\n=== Scan Finished ===")
 
 
 if __name__ == "__main__":
