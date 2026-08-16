@@ -8,6 +8,7 @@ from playwright.sync_api import sync_playwright
 
 # ==================== CONFIGURATION ====================
 CONFIG_API_URL = "https://api.npoint.io/803e335a91e27ade1511"
+DEFAULT_HARDCODED_TOPIC = "akshay-bms-alert-160826"
 
 DEFAULT_TRACKERS = [
     {
@@ -17,9 +18,9 @@ DEFAULT_TRACKERS = [
         "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
         "ntfy_topic": "akshay-bms-alert-160826",
         "days_ahead": 3,
-        "availability_filter": "both",        # "available", "filling_fast", "both"
-        "preferred_times": ["morning", "night"], # "morning", "afternoon", "evening", "night"
-        "preferred_rows": ["upper_middle", "near_top"] # "near_screen", "lower_middle", "upper_middle", "near_top"
+        "availability_filter": "both",
+        "preferred_times": ["morning", "afternoon", "evening", "night"],
+        "preferred_rows": ["upper_middle", "near_top"]
     }
 ]
 
@@ -33,7 +34,7 @@ def load_trackers():
             elif isinstance(data, list):
                 return data
     except Exception as e:
-        print(f"[!] Warning: Remote config fetch failed ({e}). Using default tracker.")
+        print(f"[!] Warning: Remote config fetch failed ({e}). Using default.")
     return DEFAULT_TRACKERS
 
 
@@ -47,7 +48,6 @@ def get_target_dates(days_ahead):
 
 
 def get_time_category(time_str):
-    """Categorizes showtime string into morning, afternoon, evening, night."""
     clean_time = time_str.upper().strip()
     match = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', clean_time)
     if not match:
@@ -69,7 +69,6 @@ def get_time_category(time_str):
 
 
 def send_ntfy_alert(topic, movie_url, user_name, results):
-    """Dispatches push notification with row and seat details."""
     message_lines = [f"Hi {user_name}, matching seats found!"]
     first_direct_url = None
 
@@ -86,6 +85,8 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
     message_lines.append("\nTap notification to open seat layout immediately.")
     message = "\n".join(message_lines)
 
+    target_topic = topic if topic else DEFAULT_HARDCODED_TOPIC
+
     headers = {
         "Title": f"🎟️ BMS Seats Alert: {user_name}!",
         "Priority": "urgent",
@@ -95,13 +96,13 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
 
     try:
         response = requests.post(
-            f"https://ntfy.sh/{topic}",
+            f"https://ntfy.sh/{target_topic}",
             data=message.encode("utf-8"),
             headers=headers,
             timeout=10,
         )
         if response.status_code == 200:
-            print(f"  [✓] Notification delivered to '{topic}'!")
+            print(f"  [✓] Notification delivered to '{target_topic}'!")
         else:
             print(f"  [!] ntfy delivery error: {response.status_code}")
     except Exception as exc:
@@ -109,7 +110,6 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
 
 
 def extract_matching_shows(page, target_theaters, availability_filter, preferred_times):
-    """Parses cinema listings and show pills for color scheme and time slot."""
     script = """
     () => {
         const venues = [];
@@ -139,9 +139,9 @@ def extract_matching_shows(page, target_theaters, availability_filter, preferred
                 if (rgbMatch) {
                     const [_, r_val, g_val, b_val] = rgbMatch.map(Number);
                     if (g_val > 140 && g_val > r_val + 20) {
-                        status = "available"; // Green
+                        status = "available";
                     } else if (r_val > 200 && g_val > 100 && b_val < 80) {
-                        status = "filling_fast"; // Amber/Orange
+                        status = "filling_fast";
                     }
                 }
 
@@ -170,16 +170,13 @@ def extract_matching_shows(page, target_theaters, availability_filter, preferred
     matched = []
     for item in found_venues:
         venue_name = item["theater"]
-        is_target_theater = any(t.lower() in venue_name.lower() for t in target_theaters)
-        if not is_target_theater:
+        if not any(t.lower() in venue_name.lower() for t in target_theaters):
             continue
 
         for show in item["shows"]:
-            # Check availability status filter
             if availability_filter != "both" and show["status"] != availability_filter:
                 continue
 
-            # Check time-of-day category
             time_cat = get_time_category(show["time"])
             if preferred_times and time_cat not in preferred_times:
                 continue
@@ -195,25 +192,17 @@ def extract_matching_shows(page, target_theaters, availability_filter, preferred
 
 
 def scan_seat_layout(page, seat_url, preferred_row_categories):
-    """
-    Renders seat layout, splits rows into 4 screen-relative zones,
-    and returns Available (Green) and Bestseller (Golden) seats.
-    """
     try:
         page.goto(seat_url, wait_until="networkidle", timeout=35000)
         page.wait_for_timeout(3500)
 
         script = """
         () => {
-            // Find all row label elements
             const rowLabels = Array.from(document.querySelectorAll('div[class*="row-name"], td[class*="row-name"], .seat-row-name, span[class*="row"]'))
                                   .map(el => el.innerText.trim())
                                   .filter(txt => txt.length > 0 && txt.length <= 3);
 
-            // Deduplicate row names maintaining top-to-bottom layout order
             const orderedRows = [...new Set(rowLabels)];
-
-            // Extract all available seats (green and bestseller/orange borders)
             const seatElements = document.querySelectorAll('a[class*="_available"], div[class*="_available"], a[class*="seat"]:not([class*="blocked"]):not([class*="sold"]), .seat-available');
             
             const results = {};
@@ -242,9 +231,6 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
         if total_rows == 0:
             return {}
 
-        # Screen is at the bottom in BookMyShow.
-        # ordered_rows top-to-bottom = [Q, P, N, M, L, K, J, H, G]
-        # Reversed = [G, H, J, K, L, M, N, P, Q] (Closest to screen first)
         rows_from_screen = list(reversed(ordered_rows))
 
         near_screen_end = max(1, math.ceil(total_rows * 0.20))
@@ -258,7 +244,6 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
             "near_top": set(rows_from_screen[upper_middle_end:])
         }
 
-        # Filter rows based on user preferences
         target_rows = set()
         for pref in preferred_row_categories:
             target_rows.update(zone_rows.get(pref, set()))
@@ -271,7 +256,7 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
         return matched_seats
 
     except Exception as exc:
-        print(f"    [!] Error scanning seat layout ({seat_url}): {exc}")
+        print(f"    [!] Error scanning seat layout: {exc}")
         return {}
 
 
@@ -279,17 +264,17 @@ def process_tracker(page, tracker):
     user_name = tracker.get("user_name", tracker.get("id", "User"))
     movie_url = tracker.get("movie_url", "").strip()
     theaters = tracker.get("theaters", [])
-    topic = tracker.get("ntfy_topic", "").strip()
+    topic = tracker.get("ntfy_topic", DEFAULT_HARDCODED_TOPIC).strip()
     days_ahead = tracker.get("days_ahead", 3)
     avail_filter = tracker.get("availability_filter", "both")
     pref_times = tracker.get("preferred_times", ["morning", "afternoon", "evening", "night"])
     pref_rows = tracker.get("preferred_rows", ["upper_middle", "near_top"])
 
-    if not movie_url or not topic or not theaters:
+    if not movie_url or not theaters:
         return
 
     print(f"\n==========================================")
-    print(f"Checking: {user_name} | Topic: {topic}")
+    print(f"Checking: {user_name} | Channel: {topic}")
     print(f"Times: {', '.join(pref_times)} | Zones: {', '.join(pref_rows)}")
     print(f"Status Filter: {avail_filter.upper()}")
     print(f"==========================================")
@@ -323,7 +308,7 @@ def process_tracker(page, tracker):
             if not seat_url:
                 continue
 
-            print(f"  -> Found {theater_name} ({show_time} - {show_status}). Inspecting seat layout...")
+            print(f"  -> Found {theater_name} ({show_time} - {show_status}). Inspecting seats...")
             matched_seats = scan_seat_layout(page, seat_url, pref_rows)
 
             if matched_seats:
