@@ -15,7 +15,7 @@ DEFAULT_TRACKERS = [
         "id": "akshay",
         "user_name": "Akshay",
         "movie_url": "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815",
-        "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
+        "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe", "Rakki"],
         "ntfy_topic": "akshay-bms-alert-160826",
         "days_ahead": 3,
         "availability_filter": "both",
@@ -45,18 +45,11 @@ def get_target_dates(days_ahead):
     ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
     for i in range(int(days_ahead) + 1):
         target_day = ist_now + timedelta(days=i)
-        dates.append(target_day.strftime("%Y%m%d"))
+        dates.append((target_day.strftime("%Y%m%d"), target_day.strftime("%d"), target_day.strftime("%b").upper()))
     return dates
 
 
 def get_time_category(time_str):
-    """
-    Categorizes time string into:
-      - morning:   12:00 AM - 12:00 PM
-      - afternoon: 12:01 PM - 04:00 PM
-      - evening:   04:01 PM - 07:00 PM
-      - night:     07:01 PM - 11:59 PM
-    """
     clean_time = time_str.upper().strip()
     match = re.search(r'(\d{1,2}):(\d{2})\s*([AP]M)', clean_time)
     if not match:
@@ -84,7 +77,7 @@ def get_time_category(time_str):
 
 
 def send_ntfy_alert(topic, movie_url, user_name, results):
-    message_lines = [f"Hi {user_name}, matching seats/shows found!"]
+    message_lines = [f"Hi {user_name}, matching shows/seats found!"]
     first_direct_url = None
 
     for date_str, theater_name, show_time, status, seat_dict, seat_url in results:
@@ -127,163 +120,132 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
         print(f"  [!] Exception delivering ntfy alert: {exc}")
 
 
-def extract_theaters_and_pills(page, target_theaters, availability_filter, preferred_times):
+def switch_date_tab_if_needed(page, day_number, month_short):
+    """Clicks the date pill on the page if BMS loaded the default date."""
+    try:
+        # Try locating date button (e.g., text containing '17' and 'AUG')
+        date_locator = page.locator(f"xpath=//*[contains(text(), '{day_number}') and contains(text(), '{month_short}')]").first
+        if date_locator.is_visible(timeout=2000):
+            date_locator.click()
+            page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+
+def extract_all_active_shows(page, target_theaters, availability_filter, preferred_times):
     """
-    Extracts theater elements and individual showtime pills matching user criteria.
-    Returns DOM handle indices so Playwright can click them directly.
+    Direct Anchor & Context Scanner:
+    Inspects all clickable booking links on the page, determines their parent theater,
+    time slot, and availability state.
     """
     script = """
     () => {
-        const timeRegex = /\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/i;
-        const matchedItems = [];
+        const timeRegex = /(\\d{1,2}:\\d{2}\\s*(?:AM|PM))/i;
+        const results = [];
 
-        // Locate all theater cards/containers
-        const allContainers = document.querySelectorAll('li, div[class*="listing"], div[class*="Venue"], div[class*="venue"], div[class*="Cinema"], div[class*="cinema"]');
-        const validTheaterContainers = [];
+        // Find all booking links that lead to seat layouts or session purchasing
+        const links = Array.from(document.querySelectorAll('a[href*="/seat-layout/"], a[href*="/buytickets/"], a[class*="showtime"], a[class*="pill"], div[class*="showtime"] a'));
+        
+        links.forEach(a => {
+            const text = a.innerText.trim();
+            const timeMatch = text.match(timeRegex);
+            if (!timeMatch) return;
 
-        for (const c of allContainers) {
-            const heading = c.querySelector('a[href*="/cinemas/"], .venue-name, a.name, [class*="venueName"], [class*="cinema-name"]');
-            if (heading && heading.innerText.trim()) {
-                // Ensure container has showtime pills inside
-                if (c.innerText.match(timeRegex)) {
-                    validTheaterContainers.push({ container: c, name: heading.innerText.trim() });
+            const timeStr = timeMatch[1].toUpperCase();
+
+            // Locate parent theater by walking up the DOM tree
+            let current = a.parentElement;
+            let theaterName = "";
+
+            while (current && current !== document.body) {
+                const nameEl = current.querySelector('a[href*="/cinemas/"], .venue-name, a.name, [class*="venueName"], [class*="cinema-name"]');
+                if (nameEl && nameEl.innerText.trim()) {
+                    theaterName = nameEl.innerText.trim();
+                    break;
+                }
+                current = current.parentElement;
+            }
+
+            if (!theaterName) return;
+
+            // Determine availability color status
+            const style = window.getComputedStyle(a);
+            const isBlocked = a.classList.contains('disabled') || 
+                              a.classList.contains('_disabled') || 
+                              a.getAttribute('aria-disabled') === 'true';
+
+            let status = "available";
+            const colorString = [style.borderColor, style.borderLeftColor, style.color].join(' ');
+            const rgbMatches = Array.from(colorString.matchAll(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/g));
+            
+            for (const m of rgbMatches) {
+                const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
+                if (r > 150 && g > 60 && b < 110) {
+                    status = "filling_fast";
+                    break;
                 }
             }
-        }
 
-        // De-duplicate containers (keep innermost specific container)
-        const filteredContainers = validTheaterContainers.filter((item, idx) => {
-            return !validTheaterContainers.some((other, oIdx) => idx !== oIdx && item.container.contains(other.container));
-        });
-
-        filteredContainers.forEach((t, tIndex) => {
-            const pills = Array.from(t.container.querySelectorAll('a, button, div, span')).filter(el => {
-                const text = el.innerText ? el.innerText.trim() : '';
-                return text.match(timeRegex) && text.length < 35 && el.children.length <= 4;
-            });
-
-            // De-duplicate pills inside this container
-            const uniquePills = pills.filter((p, pIdx) => {
-                return !pills.some((other, oIdx) => pIdx !== oIdx && p.contains(other));
-            });
-
-            uniquePills.forEach((p, pIndex) => {
-                const text = p.innerText.trim();
-                const timeMatch = text.match(timeRegex);
-                if (!timeMatch) return;
-
-                const style = window.getComputedStyle(p);
-                const parentStyle = p.parentElement ? window.getComputedStyle(p.parentElement) : style;
-
-                const isBlocked = p.classList.contains('disabled') || 
-                                  p.classList.contains('_disabled') || 
-                                  p.getAttribute('aria-disabled') === 'true' ||
-                                  style.pointerEvents === 'none' ||
-                                  style.cursor === 'not-allowed';
-
-                let status = "disabled";
-                const colorString = [
-                    style.borderColor, 
-                    style.borderLeftColor, 
-                    style.color, 
-                    style.backgroundColor,
-                    parentStyle.borderColor,
-                    parentStyle.borderLeftColor
-                ].join(' ');
-
-                const rgbMatches = Array.from(colorString.matchAll(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/g));
-                for (const m of rgbMatches) {
-                    const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
-                    if (Math.abs(r - g) < 25 && Math.abs(g - b) < 25) continue;
-
-                    if (g > 100 && g > r + 15 && g > b + 15) {
-                        status = "available"; // Green
-                        break;
-                    }
-                    if (r > 150 && g > 60 && b < 110) {
-                        status = "filling_fast"; // Orange
-                        break;
-                    }
-                }
-
-                if (status === "disabled" && !isBlocked) {
-                    status = "available";
-                }
-
-                // Tag element with unique locator attribute for Playwright click
-                const uniqueId = `bms-target-pill-${tIndex}-${pIndex}`;
-                p.setAttribute('data-bms-id', uniqueId);
-
-                matchedItems.push({
-                    theater: t.name,
-                    time: timeMatch[1].toUpperCase(),
+            if (!isBlocked) {
+                results.push({
+                    theater: theaterName,
+                    time: timeStr,
                     status: status,
-                    selector: `[data-bms-id="${uniqueId}"]`
+                    href: a.href || a.getAttribute('href') || ''
                 });
-            });
+            }
         });
 
-        return matchedItems;
+        return results;
     }
     """
     try:
-        raw_items = page.evaluate(script)
+        raw_shows = page.evaluate(script)
     except Exception as e:
-        print(f"    [!] Extraction error: {e}")
-        return []
+        print(f"    [!] Error during show extraction: {e}")
+        raw_shows = []
+
+    print(f"    [DOM SCAN] Total raw active show links found on page: {len(raw_shows)}")
 
     matched = []
-    for item in raw_items:
-        venue_name = item["theater"]
+    for show in raw_shows:
+        venue_name = show["theater"]
         is_target_theater = any(t.lower() in venue_name.lower() for t in target_theaters)
         if not is_target_theater:
             continue
 
-        time_cat = get_time_category(item["time"])
-        print(f"  [FOUND] {venue_name} | Show: {item['time']:<8} | Status: {item['status']:<12} | Slot: {time_cat}")
+        time_cat = get_time_category(show["time"])
+        print(f"    -> [THEATER MATCH] {venue_name} | Time: {show['time']} ({time_cat}) | Status: {show['status']}")
 
-        if availability_filter != "both" and item["status"] != availability_filter:
+        if availability_filter != "both" and show["status"] != availability_filter:
             continue
 
         if preferred_times and time_cat not in preferred_times and time_cat != "all":
             continue
 
-        if item["status"] in ["available", "filling_fast"]:
-            matched.append(item)
+        matched.append(show)
 
     return matched
 
 
-def scan_seat_layout(page, preferred_row_categories):
-    """
-    Evaluates current seat layout page, handles terms/quantity popups,
-    and categorizes available (green/orange) seats into screen-relative zones.
-    """
+def scan_seat_layout(page, seat_url, preferred_row_categories):
+    """Opens the direct seat layout link and checks for available rows."""
     try:
-        page.wait_for_timeout(3500)
+        page.goto(seat_url, wait_until="domcontentloaded", timeout=35000)
+        page.wait_for_timeout(3000)
 
-        # 1. Accept Terms & Conditions modal if present
+        # Handle BMS popup modals
         try:
-            accept_btn = page.locator("button:has-text('Accept'), div:has-text('Accept'), button:has-text('Proceed')")
-            if accept_btn.first.is_visible(timeout=1500):
-                accept_btn.first.click()
+            btn = page.locator("button:has-text('Accept'), div:has-text('Accept'), button:has-text('Select Seats')").first
+            if btn.is_visible(timeout=1500):
+                btn.click()
                 page.wait_for_timeout(1500)
-        except Exception:
-            pass
-
-        # 2. Handle 1-2 Ticket Quantity Selector popup if present
-        try:
-            select_seats_btn = page.locator("button:has-text('Select Seats'), div:has-text('Select Seats')")
-            if select_seats_btn.first.is_visible(timeout=1500):
-                select_seats_btn.first.click()
-                page.wait_for_timeout(2000)
         except Exception:
             pass
 
         script = """
         () => {
-            // Find all row labels
-            const rowLabels = Array.from(document.querySelectorAll('div[class*="row-name"], td[class*="row-name"], .seat-row-name, span[class*="row"], .seat-row, div[class*="Row"]'))
+            const rowLabels = Array.from(document.querySelectorAll('div[class*="row-name"], td[class*="row-name"], .seat-row-name, span[class*="row"]'))
                                   .map(el => el.innerText.trim())
                                   .filter(txt => txt.length > 0 && txt.length <= 3 && /^[A-Z0-9]+$/.test(txt));
 
@@ -316,7 +278,6 @@ def scan_seat_layout(page, preferred_row_categories):
         if total_rows == 0:
             return seats_by_row
 
-        # Rows from screen perspective (bottom to top)
         rows_from_screen = list(reversed(ordered_rows))
 
         near_screen_end = max(1, math.ceil(total_rows * 0.20))
@@ -342,7 +303,7 @@ def scan_seat_layout(page, preferred_row_categories):
         return matched_seats
 
     except Exception as exc:
-        print(f"    [!] Error scanning seat layout: {exc}")
+        print(f"    [!] Error inspecting seat layout: {exc}")
         return {}
 
 
@@ -368,7 +329,7 @@ def process_tracker(context, tracker):
     target_dates = get_target_dates(days_ahead)
     final_alert_items = []
 
-    for date_str in target_dates:
+    for date_str, day_num, month_short in target_dates:
         full_date_url = f"{movie_url.rstrip('/')}/{date_str}"
         formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
         print(f"\n[{time.strftime('%X')}] Scanning showtimes for {formatted_date} ({date_str})...")
@@ -376,15 +337,19 @@ def process_tracker(context, tracker):
         page = context.new_page()
         try:
             page.goto(full_date_url, wait_until="networkidle", timeout=35000)
-            page.wait_for_timeout(3500)
+            page.wait_for_timeout(3000)
+            switch_date_tab_if_needed(page, day_num, month_short)
         except Exception as e:
             print(f"  [!] Failed to load {full_date_url}: {e}")
             page.close()
             continue
 
-        matched_shows = extract_theaters_and_pills(page, theaters, avail_filter, pref_times)
+        page_title = page.title()
+        print(f"    [PAGE TITLE] {page_title}")
+
+        matched_shows = extract_all_active_shows(page, theaters, avail_filter, pref_times)
         if not matched_shows:
-            print("  [-] No shows matching availability or time preferences on this date.")
+            print("  [-] No matching showtimes matching availability/time preferences.")
             page.close()
             continue
 
@@ -392,20 +357,13 @@ def process_tracker(context, tracker):
             theater_name = show["theater"]
             show_time = show["time"]
             show_status = show["status"]
-            selector = show["selector"]
+            seat_url = show["href"]
 
-            print(f"\n  -> [CLICKING SHOW] {theater_name} @ {show_time} to inspect seat layout...")
-            
-            # Click the showtime pill to navigate to seat selection layout
-            try:
-                page.click(selector, timeout=5000)
-                page.wait_for_timeout(3500)
-            except Exception as e:
-                print(f"     [!] Could not click showtime pill ({e}). Continuing...")
-                continue
+            if not seat_url.startswith("http"):
+                seat_url = f"https://in.bookmyshow.com{seat_url}"
 
-            seat_layout_url = page.url
-            matched_seats = scan_seat_layout(page, pref_rows)
+            print(f"  -> Inspecting seat layout for {theater_name} @ {show_time}...")
+            matched_seats = scan_seat_layout(page, seat_url, pref_rows)
 
             if matched_seats:
                 print(f"     [🎉 SEATS MATCHED] Rows: {list(matched_seats.keys())}")
@@ -415,14 +373,10 @@ def process_tracker(context, tracker):
                     show_time,
                     show_status,
                     matched_seats,
-                    seat_layout_url
+                    seat_url
                 ))
             else:
-                print("     [-] No matching seats open in selected row zones.")
-
-            # Return back to main date view for next show iteration
-            page.goto(full_date_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2500)
+                print("     [-] No matching seats in selected distance zones.")
 
         page.close()
 
@@ -439,7 +393,11 @@ def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox"
+            ]
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
