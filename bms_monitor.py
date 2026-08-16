@@ -1,26 +1,41 @@
+import json
+import os
 import time
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ==================== CONFIGURATION ====================
-# Base movie booking URL without the date at the end
-BASE_MOVIE_URL = "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815"
+# ==================== DEFAULT CONFIGURATION ====================
+DEFAULT_CONFIG = {
+    "movie_url": "https://in.bookmyshow.com/movies/chennai/vishwanath-and-sons/buytickets/ET00489815",
+    "theaters": ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"],
+    "ntfy_topic": "akshay-bms-alert-160826",
+    "days_ahead": 3
+}
 
-# List of target theater keywords to monitor
-TARGET_THEATERS = ["PVR", "INOX", "Sathyam", "SPI", "Palazzo", "AGS", "Luxe"]
+CONFIG_FILE = "config.json"
 
-# Your ntfy topic name
-NTFY_TOPIC = "akshay-bms-alert-160826"
+def load_config():
+    """Loads configuration from config.json if present; otherwise uses defaults."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {**DEFAULT_CONFIG, **data}
+        except Exception as e:
+            print(f"[!] Warning: Failed to read config.json ({e}). Using defaults.")
+    return DEFAULT_CONFIG
 
-# Number of future days to scan (0 = today only, 3 = today + next 3 days)
-DAYS_AHEAD = 3
-# =======================================================
+CONFIG = load_config()
+BASE_MOVIE_URL = CONFIG["movie_url"]
+TARGET_THEATERS = CONFIG["theaters"]
+NTFY_TOPIC = CONFIG["ntfy_topic"]
+DAYS_AHEAD = int(CONFIG.get("days_ahead", 3))
+# ===============================================================
 
 
 def get_target_dates():
-    """Generates YYYYMMDD date strings for today and the next N days."""
     dates = []
     base_date = datetime.now()
     for i in range(DAYS_AHEAD + 1):
@@ -30,14 +45,12 @@ def get_target_dates():
 
 
 def send_ntfy_alert(results_by_date):
-    """Sends consolidated push notification grouped by date via ntfy.sh"""
     message_lines = ["Bookings opened for:"]
-    
     first_direct_url = None
+    
     for date_str, theaters, url in results_by_date:
         if not first_direct_url:
             first_direct_url = url
-        
         formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
         message_lines.append(f"\n[{formatted_date}]:")
         for t in theaters:
@@ -61,7 +74,7 @@ def send_ntfy_alert(results_by_date):
             timeout=10,
         )
         if response.status_code == 200:
-            print("[✓] Notification sent to ntfy app successfully!")
+            print("[✓] Notification delivered to ntfy app successfully!")
         else:
             print(f"[!] ntfy request failed with status: {response.status_code}")
     except Exception as exc:
@@ -69,7 +82,6 @@ def send_ntfy_alert(results_by_date):
 
 
 def scan_date(page, target_theaters, full_url):
-    """Loads a single date URL and extracts matching theaters."""
     try:
         page.goto(full_url, wait_until="networkidle", timeout=35000)
         page.wait_for_timeout(3000)
@@ -77,7 +89,6 @@ def scan_date(page, target_theaters, full_url):
         soup = BeautifulSoup(page.content(), "html.parser")
         found_theaters = set()
 
-        # Extract cinema names from venue links or containers
         for el in soup.find_all("a", href=lambda h: h and ("/cinemas/" in h or "/buytickets/" in h)):
             text = el.get_text(strip=True)
             if text and len(text) > 3:
@@ -97,7 +108,6 @@ def scan_date(page, target_theaters, full_url):
                     break
 
         return list(set(matched))
-
     except Exception as exc:
         print(f"    [!] Error scanning {full_url}: {exc}")
         return []
@@ -106,11 +116,11 @@ def scan_date(page, target_theaters, full_url):
 def main():
     target_dates = get_target_dates()
     print(f"=== Starting BookMyShow Multi-Date Scan ===")
+    print(f"Movie URL: {BASE_MOVIE_URL}")
     print(f"Dates to scan: {', '.join(target_dates)}")
     print(f"Theaters: {', '.join(TARGET_THEATERS)}\n")
 
     matched_results = []
-
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True,
@@ -125,10 +135,9 @@ def main():
         for date_str in target_dates:
             url = f"{BASE_MOVIE_URL.rstrip('/')}/{date_str}"
             formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
-            print(f"[{time.strftime('%X')}] Checking {formatted_date} ({url})...")
+            print(f"[{time.strftime('%X')}] Checking {formatted_date}...")
 
             matches = scan_date(page, TARGET_THEATERS, url)
-
             if matches:
                 print(f"  -> [MATCH FOUND] {len(matches)} theater(s): {matches}")
                 matched_results.append((date_str, matches, url))
@@ -137,12 +146,11 @@ def main():
 
         browser.close()
 
-    # Send consolidated alert if any matches were found across any date
     if matched_results:
-        print(f"\n[🎉] Delivering push alert for {len(matched_results)} active date(s)...")
+        print(f"\n[🎉] Delivering push alert...")
         send_ntfy_alert(matched_results)
     else:
-        print("\n[-] No matches found across today and the next 3 days.")
+        print("\n[-] No matches found across today and next days.")
 
 
 if __name__ == "__main__":
