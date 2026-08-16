@@ -84,7 +84,7 @@ def get_time_category(time_str):
 
 
 def send_ntfy_alert(topic, movie_url, user_name, results):
-    message_lines = [f"Hi {user_name}, matching shows/seats found!"]
+    message_lines = [f"Hi {user_name}, matching seats/shows found!"]
     first_direct_url = None
 
     for date_str, theater_name, show_time, status, seat_dict, seat_url in results:
@@ -100,15 +100,15 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
         else:
             message_lines.append("  (Show is open for booking)")
 
-    message_lines.append("\nTap to open BookMyShow immediately.")
+    message_lines.append("\nTap to open seat selection directly on BookMyShow.")
     message = "\n".join(message_lines)
 
     target_topic = topic if topic else DEFAULT_HARDCODED_TOPIC
 
     headers = {
-        "Title": f"BMS Alert: {user_name}!",
+        "Title": f"🎟️ BMS Seats Alert: {user_name}!",
         "Priority": "urgent",
-        "Tags": "ticket,seat",
+        "Tags": "ticket,movie_camera",
         "Click": first_direct_url or movie_url,
     }
 
@@ -127,187 +127,165 @@ def send_ntfy_alert(topic, movie_url, user_name, results):
         print(f"  [!] Exception delivering ntfy alert: {exc}")
 
 
-def extract_all_venues_and_shows(page):
+def extract_theaters_and_pills(page, target_theaters, availability_filter, preferred_times):
     """
-    Robust extractor: Finds elements matching time formats and searches 
-    parent containers to identify the theater name and show status.
+    Extracts theater elements and individual showtime pills matching user criteria.
+    Returns DOM handle indices so Playwright can click them directly.
     """
     script = """
     () => {
         const timeRegex = /\\b(\\d{1,2}:\\d{2}\\s*(?:AM|PM))\\b/i;
-        const allElements = Array.from(document.querySelectorAll('a, button, div, span'));
-        const showPills = [];
+        const matchedItems = [];
 
-        // 1. Identify all showtime pill containers
-        for (const el of allElements) {
-            const text = el.innerText ? el.innerText.trim() : '';
-            const match = text.match(timeRegex);
-            
-            // Only consider elements where the immediate text is the showtime pill
-            if (match && text.length < 35 && el.children.length <= 4) {
-                // Avoid capturing duplicate nested parent text
-                if (!showPills.some(p => p.element.contains(el) || el.contains(p.element))) {
-                    showPills.push({ element: el, timeStr: match[1].toUpperCase() });
+        // Locate all theater cards/containers
+        const allContainers = document.querySelectorAll('li, div[class*="listing"], div[class*="Venue"], div[class*="venue"], div[class*="Cinema"], div[class*="cinema"]');
+        const validTheaterContainers = [];
+
+        for (const c of allContainers) {
+            const heading = c.querySelector('a[href*="/cinemas/"], .venue-name, a.name, [class*="venueName"], [class*="cinema-name"]');
+            if (heading && heading.innerText.trim()) {
+                // Ensure container has showtime pills inside
+                if (c.innerText.match(timeRegex)) {
+                    validTheaterContainers.push({ container: c, name: heading.innerText.trim() });
                 }
             }
         }
 
-        const theaterMap = new Map();
-
-        // 2. Resolve parent theater for each showtime pill
-        for (const pill of showPills) {
-            const el = pill.element;
-            
-            // Traverse up to find a container with a theater title
-            let current = el.parentElement;
-            let theaterName = '';
-
-            while (current && current !== document.body) {
-                const nameEl = current.querySelector('a[href*="/cinemas/"], .venue-name, a.name, [class*="cinema-name"], [class*="venueName"]');
-                if (nameEl && nameEl.innerText.trim()) {
-                    theaterName = nameEl.innerText.trim();
-                    break;
-                }
-                
-                // Secondary check: look for prominent title text within this container
-                const possibleTitles = Array.from(current.querySelectorAll('a, span, div, h3, h4'))
-                    .map(t => t.innerText ? t.innerText.trim() : '')
-                    .filter(t => t.length > 5 && t.length < 80 && (
-                        t.includes('Cinemas') || t.includes('PVR') || t.includes('INOX') || 
-                        t.includes('Sathyam') || t.includes('SPI') || t.includes('Mall') || 
-                        t.includes('Laser') || t.includes('Screens') || t.includes('Multiplex')
-                    ));
-
-                if (possibleTitles.length > 0) {
-                    theaterName = possibleTitles[0];
-                    break;
-                }
-
-                current = current.parentElement;
-            }
-
-            if (!theaterName) continue;
-
-            // Determine show status (Available vs Filling Fast vs Disabled)
-            const style = window.getComputedStyle(el);
-            const parentStyle = el.parentElement ? window.getComputedStyle(el.parentElement) : style;
-
-            const isBlocked = el.classList.contains('disabled') || 
-                              el.classList.contains('_disabled') || 
-                              el.getAttribute('aria-disabled') === 'true' ||
-                              style.pointerEvents === 'none' ||
-                              style.cursor === 'not-allowed';
-
-            let status = "disabled";
-            const colorString = [
-                style.borderColor, 
-                style.borderLeftColor, 
-                style.color, 
-                style.backgroundColor,
-                parentStyle.borderColor,
-                parentStyle.borderLeftColor
-            ].join(' ');
-
-            const rgbMatches = Array.from(colorString.matchAll(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/g));
-            for (const m of rgbMatches) {
-                const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
-                
-                // Ignore grey/monochrome tones
-                if (Math.abs(r - g) < 25 && Math.abs(g - b) < 25) continue;
-
-                // Green: Green channel is clearly dominant
-                if (g > 100 && g > r + 15 && g > b + 15) {
-                    status = "available";
-                    break;
-                }
-                // Orange/Amber: Red is high, Green is moderate, Blue is low
-                if (r > 150 && g > 60 && b < 110) {
-                    status = "filling_fast";
-                    break;
-                }
-            }
-
-            // Fallback: If not blocked and clickable
-            if (status === "disabled" && !isBlocked && (el.tagName === 'A' || el.onclick || el.getAttribute('role') === 'button')) {
-                status = "available";
-            }
-
-            const href = el.getAttribute('href') || el.closest('a')?.getAttribute('href') || '';
-
-            if (!theaterMap.has(theaterName)) {
-                theaterMap.set(theaterName, []);
-            }
-
-            theaterMap.get(theaterName).push({
-                time: pill.timeStr,
-                status: status,
-                href: href
-            });
-        }
-
-        const results = [];
-        theaterMap.forEach((shows, theater) => {
-            results.push({ theater, shows });
+        // De-duplicate containers (keep innermost specific container)
+        const filteredContainers = validTheaterContainers.filter((item, idx) => {
+            return !validTheaterContainers.some((other, oIdx) => idx !== oIdx && item.container.contains(other.container));
         });
-        return results;
+
+        filteredContainers.forEach((t, tIndex) => {
+            const pills = Array.from(t.container.querySelectorAll('a, button, div, span')).filter(el => {
+                const text = el.innerText ? el.innerText.trim() : '';
+                return text.match(timeRegex) && text.length < 35 && el.children.length <= 4;
+            });
+
+            // De-duplicate pills inside this container
+            const uniquePills = pills.filter((p, pIdx) => {
+                return !pills.some((other, oIdx) => pIdx !== oIdx && p.contains(other));
+            });
+
+            uniquePills.forEach((p, pIndex) => {
+                const text = p.innerText.trim();
+                const timeMatch = text.match(timeRegex);
+                if (!timeMatch) return;
+
+                const style = window.getComputedStyle(p);
+                const parentStyle = p.parentElement ? window.getComputedStyle(p.parentElement) : style;
+
+                const isBlocked = p.classList.contains('disabled') || 
+                                  p.classList.contains('_disabled') || 
+                                  p.getAttribute('aria-disabled') === 'true' ||
+                                  style.pointerEvents === 'none' ||
+                                  style.cursor === 'not-allowed';
+
+                let status = "disabled";
+                const colorString = [
+                    style.borderColor, 
+                    style.borderLeftColor, 
+                    style.color, 
+                    style.backgroundColor,
+                    parentStyle.borderColor,
+                    parentStyle.borderLeftColor
+                ].join(' ');
+
+                const rgbMatches = Array.from(colorString.matchAll(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/g));
+                for (const m of rgbMatches) {
+                    const r = parseInt(m[1]), g = parseInt(m[2]), b = parseInt(m[3]);
+                    if (Math.abs(r - g) < 25 && Math.abs(g - b) < 25) continue;
+
+                    if (g > 100 && g > r + 15 && g > b + 15) {
+                        status = "available"; // Green
+                        break;
+                    }
+                    if (r > 150 && g > 60 && b < 110) {
+                        status = "filling_fast"; // Orange
+                        break;
+                    }
+                }
+
+                if (status === "disabled" && !isBlocked) {
+                    status = "available";
+                }
+
+                // Tag element with unique locator attribute for Playwright click
+                const uniqueId = `bms-target-pill-${tIndex}-${pIndex}`;
+                p.setAttribute('data-bms-id', uniqueId);
+
+                matchedItems.push({
+                    theater: t.name,
+                    time: timeMatch[1].toUpperCase(),
+                    status: status,
+                    selector: `[data-bms-id="${uniqueId}"]`
+                });
+            });
+        });
+
+        return matchedItems;
     }
     """
     try:
-        return page.evaluate(script)
+        raw_items = page.evaluate(script)
     except Exception as e:
-        print(f"    [!] DOM extraction error: {e}")
+        print(f"    [!] Extraction error: {e}")
         return []
 
-
-def filter_shows(found_venues, target_theaters, availability_filter, preferred_times):
     matched = []
-    for item in found_venues:
+    for item in raw_items:
         venue_name = item["theater"]
         is_target_theater = any(t.lower() in venue_name.lower() for t in target_theaters)
         if not is_target_theater:
             continue
 
-        print(f"  [DEBUG] Found Target Theater: {venue_name}")
-        for show in item["shows"]:
-            time_cat = get_time_category(show["time"])
-            print(f"         Show: {show['time']:<10} | Status: {show['status']:<12} | Slot: {time_cat}")
+        time_cat = get_time_category(item["time"])
+        print(f"  [FOUND] {venue_name} | Show: {item['time']:<8} | Status: {item['status']:<12} | Slot: {time_cat}")
 
-            if availability_filter != "both" and show["status"] != availability_filter:
-                continue
+        if availability_filter != "both" and item["status"] != availability_filter:
+            continue
 
-            if preferred_times and time_cat not in preferred_times and time_cat != "all":
-                continue
+        if preferred_times and time_cat not in preferred_times and time_cat != "all":
+            continue
 
-            if show["status"] in ["available", "filling_fast"]:
-                matched.append({
-                    "theater": venue_name,
-                    "time": show["time"],
-                    "status": show["status"],
-                    "href": show["href"]
-                })
+        if item["status"] in ["available", "filling_fast"]:
+            matched.append(item)
 
     return matched
 
 
-def scan_seat_layout(page, seat_url, preferred_row_categories):
+def scan_seat_layout(page, preferred_row_categories):
+    """
+    Evaluates current seat layout page, handles terms/quantity popups,
+    and categorizes available (green/orange) seats into screen-relative zones.
+    """
     try:
-        page.goto(seat_url, wait_until="domcontentloaded", timeout=35000)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(3500)
 
-        # Handle BMS popups if present
+        # 1. Accept Terms & Conditions modal if present
         try:
             accept_btn = page.locator("button:has-text('Accept'), div:has-text('Accept'), button:has-text('Proceed')")
             if accept_btn.first.is_visible(timeout=1500):
                 accept_btn.first.click()
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        # 2. Handle 1-2 Ticket Quantity Selector popup if present
+        try:
+            select_seats_btn = page.locator("button:has-text('Select Seats'), div:has-text('Select Seats')")
+            if select_seats_btn.first.is_visible(timeout=1500):
+                select_seats_btn.first.click()
+                page.wait_for_timeout(2000)
         except Exception:
             pass
 
         script = """
         () => {
-            const rowLabels = Array.from(document.querySelectorAll('div[class*="row-name"], td[class*="row-name"], .seat-row-name, span[class*="row"]'))
+            // Find all row labels
+            const rowLabels = Array.from(document.querySelectorAll('div[class*="row-name"], td[class*="row-name"], .seat-row-name, span[class*="row"], .seat-row, div[class*="Row"]'))
                                   .map(el => el.innerText.trim())
-                                  .filter(txt => txt.length > 0 && txt.length <= 3);
+                                  .filter(txt => txt.length > 0 && txt.length <= 3 && /^[A-Z0-9]+$/.test(txt));
 
             const orderedRows = [...new Set(rowLabels)];
             const seatElements = document.querySelectorAll('a[class*="_available"], div[class*="_available"], a[class*="seat"]:not([class*="blocked"]):not([class*="sold"]), .seat-available');
@@ -338,6 +316,7 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
         if total_rows == 0:
             return seats_by_row
 
+        # Rows from screen perspective (bottom to top)
         rows_from_screen = list(reversed(ordered_rows))
 
         near_screen_end = max(1, math.ceil(total_rows * 0.20))
@@ -363,11 +342,11 @@ def scan_seat_layout(page, seat_url, preferred_row_categories):
         return matched_seats
 
     except Exception as exc:
-        print(f"    [!] Error inspecting seat layout: {exc}")
+        print(f"    [!] Error scanning seat layout: {exc}")
         return {}
 
 
-def process_tracker(page, tracker):
+def process_tracker(context, tracker):
     user_name = tracker.get("user_name", tracker.get("id", "User"))
     movie_url = tracker.get("movie_url", "").strip()
     theaters = tracker.get("theaters", [])
@@ -383,7 +362,7 @@ def process_tracker(page, tracker):
     print(f"\n==========================================")
     print(f"Watcher: {user_name} | ntfy Topic: {topic}")
     print(f"Theaters: {', '.join(theaters)}")
-    print(f"Times: {', '.join(pref_times)} | Status Filter: {avail_filter.upper()}")
+    print(f"Times: {', '.join(pref_times)} | Status: {avail_filter.upper()}")
     print(f"==========================================")
 
     target_dates = get_target_dates(days_ahead)
@@ -394,49 +373,58 @@ def process_tracker(page, tracker):
         formatted_date = datetime.strptime(date_str, "%Y%m%d").strftime("%d %b (%a)")
         print(f"\n[{time.strftime('%X')}] Scanning showtimes for {formatted_date} ({date_str})...")
 
+        page = context.new_page()
         try:
-            page.goto(full_date_url, wait_until="domcontentloaded", timeout=35000)
-            
-            # Wait for showtimes or page content to hydrate
-            try:
-                page.wait_for_selector("text=AM, text=PM", timeout=6000)
-            except Exception:
-                page.wait_for_timeout(3500)
-                
+            page.goto(full_date_url, wait_until="networkidle", timeout=35000)
+            page.wait_for_timeout(3500)
         except Exception as e:
             print(f"  [!] Failed to load {full_date_url}: {e}")
+            page.close()
             continue
 
-        found_venues = extract_all_venues_and_shows(page)
-        matched_shows = filter_shows(found_venues, theaters, avail_filter, pref_times)
-
+        matched_shows = extract_theaters_and_pills(page, theaters, avail_filter, pref_times)
         if not matched_shows:
-            print("  [-] No matching showtimes matching availability/time preferences.")
+            print("  [-] No shows matching availability or time preferences on this date.")
+            page.close()
             continue
 
         for show in matched_shows:
             theater_name = show["theater"]
             show_time = show["time"]
             show_status = show["status"]
-            href = show["href"]
+            selector = show["selector"]
 
-            seat_url = f"https://in.bookmyshow.com{href}" if href.startswith("/") else href
+            print(f"\n  -> [CLICKING SHOW] {theater_name} @ {show_time} to inspect seat layout...")
+            
+            # Click the showtime pill to navigate to seat selection layout
+            try:
+                page.click(selector, timeout=5000)
+                page.wait_for_timeout(3500)
+            except Exception as e:
+                print(f"     [!] Could not click showtime pill ({e}). Continuing...")
+                continue
 
-            if seat_url and "/seat-layout/" in seat_url:
-                print(f"  -> Checking seat layout for {theater_name} ({show_time})...")
-                matched_seats = scan_seat_layout(page, seat_url, pref_rows)
+            seat_layout_url = page.url
+            matched_seats = scan_seat_layout(page, pref_rows)
+
+            if matched_seats:
+                print(f"     [🎉 SEATS MATCHED] Rows: {list(matched_seats.keys())}")
+                final_alert_items.append((
+                    date_str,
+                    theater_name,
+                    show_time,
+                    show_status,
+                    matched_seats,
+                    seat_layout_url
+                ))
             else:
-                matched_seats = {}
+                print("     [-] No matching seats open in selected row zones.")
 
-            print(f"     [🎉 MATCH CONFIRMED] {theater_name} @ {show_time} ({show_status.upper()})")
-            final_alert_items.append((
-                date_str,
-                theater_name,
-                show_time,
-                show_status,
-                matched_seats,
-                seat_url or full_date_url
-            ))
+            # Return back to main date view for next show iteration
+            page.goto(full_date_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2500)
+
+        page.close()
 
     if final_alert_items:
         print(f"\n[🚀] Delivering instant push alert to {user_name}...")
@@ -457,10 +445,9 @@ def main():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
         )
-        page = context.new_page()
 
         for tracker in trackers:
-            process_tracker(page, tracker)
+            process_tracker(context, tracker)
 
         browser.close()
 
