@@ -17,9 +17,9 @@
       --success: #10b981;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
-    .container { width: 100%; max-width: 540px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
-    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+    body { background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; min-height: 100vh; align-items: center; }
+    .container { width: 100%; max-width: 500px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+    h1 { font-size: 1.35rem; font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
     p.sub { font-size: 0.85rem; color: var(--muted); margin-bottom: 20px; }
     .form-group { margin-bottom: 16px; }
     label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; color: var(--text); }
@@ -27,17 +27,13 @@
       width: 100%; background: var(--input-bg); border: 1px solid var(--border);
       border-radius: 8px; padding: 10px 12px; color: var(--text); font-size: 0.9rem; outline: none;
     }
-    input:focus, textarea:focus { border-color: var(--accent); }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent); }
     small { font-size: 0.75rem; color: var(--muted); display: block; margin-top: 4px; }
-    .btn-group { display: flex; gap: 10px; margin-top: 24px; }
     button {
-      flex: 1; padding: 12px; border: none; border-radius: 8px; font-weight: 600; font-size: 0.9rem;
-      cursor: pointer; transition: 0.2s ease;
+      width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: 600; font-size: 0.95rem;
+      cursor: pointer; transition: 0.2s ease; background: var(--accent); color: white; margin-top: 10px;
     }
-    .btn-primary { background: var(--accent); color: white; }
-    .btn-primary:hover { background: var(--accent-hover); }
-    .btn-secondary { background: #334155; color: white; }
-    .btn-secondary:hover { background: #475569; }
+    button:hover { background: var(--accent-hover); }
     #status { margin-top: 16px; font-size: 0.85rem; padding: 10px; border-radius: 8px; display: none; }
     .status-success { background: rgba(16, 185, 129, 0.15); color: var(--success); border: 1px solid var(--success); }
     .status-error { background: rgba(225, 29, 72, 0.15); color: var(--accent); border: 1px solid var(--accent); }
@@ -46,35 +42,22 @@
 <body>
 
 <div class="container">
-  <h1>🎟️ BMS Alert Configurator</h1>
-  <p class="sub">Update target movies and theaters. The cloud bot auto-syncs.</p>
-
-  <div class="form-group">
-    <label>GitHub Repository (username/repo-name)</label>
-    <input type="text" id="repo" placeholder="e.g. anubr/bms-alert-bot">
-  </div>
-
-  <div class="form-group">
-    <label>GitHub Personal Access Token (PAT)</label>
-    <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
-    <small>Requires <code>repo</code> or <code>contents:write</code> scope to commit changes.</small>
-  </div>
-
-  <hr style="border: 0; border-top: 1px solid var(--border); margin: 20px 0;">
+  <h1>🎟️ BMS Alert Manager</h1>
+  <p class="sub">Update the target movie and theater keywords below. Scanners sync automatically.</p>
 
   <div class="form-group">
     <label>BookMyShow Base Movie URL</label>
     <textarea id="movie_url" rows="2" placeholder="https://in.bookmyshow.com/movies/chennai/movie-name/buytickets/ET00000000"></textarea>
-    <small>Do not include the date parameter at the end.</small>
+    <small>Provide URL without the date at the end.</small>
   </div>
 
   <div class="form-group">
-    <label>Target Theaters (comma-separated keywords)</label>
-    <input type="text" id="theaters" placeholder="PVR, INOX, Sathyam, Palazzo, AGS">
+    <label>Target Theaters (comma-separated)</label>
+    <input type="text" id="theaters" placeholder="PVR, INOX, Sathyam, Palazzo, AGS, Luxe">
   </div>
 
   <div class="form-group">
-    <label>ntfy Topic</label>
+    <label>ntfy Notification Topic</label>
     <input type="text" id="ntfy_topic" placeholder="akshay-bms-alert-160826">
   </div>
 
@@ -89,23 +72,14 @@
     </select>
   </div>
 
-  <div class="btn-group">
-    <button class="btn-primary" onclick="saveConfiguration()">💾 Save & Update</button>
-    <button class="btn-secondary" onclick="triggerWorkflow()">⚡ Run Scan Now</button>
-  </div>
-
+  <button onclick="saveConfiguration()">💾 Save & Update Scanner</button>
   <div id="status"></div>
 </div>
 
 <script>
-  // Load saved credentials from localStorage
-  window.onload = () => {
-    document.getElementById('repo').value = localStorage.getItem('bms_repo') || '';
-    document.getElementById('token').value = localStorage.getItem('bms_token') || '';
-    if (localStorage.getItem('bms_repo') && localStorage.getItem('bms_token')) {
-      loadCurrentConfig();
-    }
-  };
+  const CONFIG_API_URL = "https://api.npoint.io/803e335a91e27ade1511";
+
+  window.onload = loadCurrentConfig;
 
   function showStatus(msg, isError = false) {
     const el = document.getElementById('status');
@@ -115,108 +89,45 @@
   }
 
   async function loadCurrentConfig() {
-    const repo = document.getElementById('repo').value.trim();
-    const token = document.getElementById('token').value.trim();
-    if (!repo || !token) return;
-
     try {
-      const res = await fetch(`https://api.github.com/repos/${repo}/contents/config.json`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await fetch(CONFIG_API_URL);
       if (res.ok) {
         const data = await res.json();
-        const jsonContent = JSON.parse(decodeURIComponent(escape(atob(data.content))));
-        document.getElementById('movie_url').value = jsonContent.movie_url || '';
-        document.getElementById('theaters').value = (jsonContent.theaters || []).join(', ');
-        document.getElementById('ntfy_topic').value = jsonContent.ntfy_topic || '';
-        document.getElementById('days_ahead').value = jsonContent.days_ahead ?? 3;
+        document.getElementById('movie_url').value = data.movie_url || '';
+        document.getElementById('theaters').value = (data.theaters || []).join(', ');
+        document.getElementById('ntfy_topic').value = data.ntfy_topic || '';
+        document.getElementById('days_ahead').value = data.days_ahead ?? 3;
       }
     } catch (e) {
-      console.log('Failed to fetch existing config', e);
+      showStatus('Failed to load current settings.', true);
     }
   }
 
   async function saveConfiguration() {
-    const repo = document.getElementById('repo').value.trim();
-    const token = document.getElementById('token').value.trim();
     const movie_url = document.getElementById('movie_url').value.trim();
     const theaters = document.getElementById('theaters').value.split(',').map(t => t.trim()).filter(Boolean);
     const ntfy_topic = document.getElementById('ntfy_topic').value.trim();
     const days_ahead = parseInt(document.getElementById('days_ahead').value, 10);
 
-    if (!repo || !token || !movie_url) {
-      showStatus('Please fill in GitHub Repo, Token, and Movie URL.', true);
+    if (!movie_url || !theaters.length || !ntfy_topic) {
+      showStatus('Please fill in Movie URL, Theaters, and ntfy topic.', true);
       return;
     }
 
-    localStorage.setItem('bms_repo', repo);
-    localStorage.setItem('bms_token', token);
-
-    const configData = { movie_url, theaters, ntfy_topic, days_ahead };
-    const contentEncoded = btoa(unescape(encodeURIComponent(JSON.stringify(configData, null, 2))));
-
-    showStatus('Saving changes to GitHub...');
+    const payload = { movie_url, theaters, ntfy_topic, days_ahead };
+    showStatus('Saving changes...');
 
     try {
-      // 1. Get existing file SHA
-      let sha = null;
-      const getRes = await fetch(`https://api.github.com/repos/${repo}/contents/config.json`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (getRes.ok) {
-        const fileData = await getRes.json();
-        sha = fileData.sha;
-      }
-
-      // 2. Commit updated config.json
-      const putRes = await fetch(`https://api.github.com/repos/${repo}/contents/config.json`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          message: 'Update BMS alert target config [via Web UI]',
-          content: contentEncoded,
-          sha: sha || undefined
-        })
-      });
-
-      if (putRes.ok) {
-        showStatus('✓ Configuration saved! GitHub Actions will scan this movie automatically.');
-      } else {
-        const err = await putRes.json();
-        showStatus(`Error saving: ${err.message}`, true);
-      }
-    } catch (err) {
-      showStatus(`Network Error: ${err.message}`, true);
-    }
-  }
-
-  async function triggerWorkflow() {
-    const repo = document.getElementById('repo').value.trim();
-    const token = document.getElementById('token').value.trim();
-    if (!repo || !token) {
-      showStatus('GitHub Repo & Token are required to trigger runs.', true);
-      return;
-    }
-
-    showStatus('Triggering scan on GitHub Actions...');
-    try {
-      const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/bms_check.yml/dispatches`, {
+      const res = await fetch(CONFIG_API_URL, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ ref: 'main' })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
 
-      if (res.status === 204) {
-        showStatus('✓ Scan triggered! Check the Actions tab or wait for ntfy alerts.');
+      if (res.ok) {
+        showStatus('✓ Configuration saved! Cloud scanners are now synced.');
       } else {
-        const err = await res.json();
-        showStatus(`Trigger failed: ${err.message}`, true);
+        showStatus('Error saving configuration.', true);
       }
     } catch (err) {
       showStatus(`Network Error: ${err.message}`, true);
